@@ -1,5 +1,6 @@
 /* ==========================================================================
-   LÓGICA PRINCIPAL JAVASCRIPT - CONTROLE DE ESTOQUE MS ACCESS
+   LÓGICA PRINCIPAL JAVASCRIPT - CONTROLE DE ESTOQUE
+   Suporte Híbrido: Servidor Flask API / GitHub Pages (LocalStorage DB)
    ========================================================================== */
 
 let currentUser = null;
@@ -7,6 +8,362 @@ let selectedUnitId = null;
 let produtosCache = [];
 let categoriasCache = [];
 let unidadesCache = [];
+
+// --- MOTOR LOCALDB PARA GITHUB PAGES (CLIENT-SIDE ESTÁTICO) ---
+const LocalDB = {
+    init() {
+        if (!localStorage.getItem('gh_unidades')) {
+            localStorage.setItem('gh_unidades', JSON.stringify([
+                { id_unidade: 1, nome_unidade: "Unidade Matriz", endereco: "Av. Principal, 1000 - Centro", cnpj: "00.000.000/0001-00" }
+            ]));
+        }
+        if (!localStorage.getItem('gh_usuarios')) {
+            localStorage.setItem('gh_usuarios', JSON.stringify([
+                { id_usuario: 1, usuario: "admin", senha: "admin123", nome_usuario: "Administrador do Sistema", nivel_acesso: "Administrador", id_unidade: 1, status_aprovacao: "Aprovado", nome_unidade: "Unidade Matriz" }
+            ]));
+        }
+        if (!localStorage.getItem('gh_categorias')) {
+            localStorage.setItem('gh_categorias', JSON.stringify([
+                { id_categoria: 1, nome_categoria: "Eletrônicos" },
+                { id_categoria: 2, nome_categoria: "Escritório" },
+                { id_categoria: 3, nome_categoria: "Informática" }
+            ]));
+        }
+        if (!localStorage.getItem('gh_fornecedores')) {
+            localStorage.setItem('gh_fornecedores', JSON.stringify([
+                { id_fornecedor: 1, nome_fornecedor: "Tech Brasil LTDA", cnpj_cpf: "12.345.678/0001-90", telefone: "(11) 98888-7777", email: "contato@techbrasil.com" }
+            ]));
+        }
+        if (!localStorage.getItem('gh_produtos')) {
+            localStorage.setItem('gh_produtos', JSON.stringify([
+                { id_produto: 1, codigo_barras: "7891234567890", nome_produto: "Mouse Sem Fio USB", id_categoria: 3, nome_categoria: "Informática", id_fornecedor: 1, nome_fornecedor: "Tech Brasil LTDA", estoque_minimo: 5, preco_custo: 25.00, preco_venda: 49.90, data_cadastro: "2026-07-25 10:00:00", id_unidade: 1, nome_unidade: "Unidade Matriz" }
+            ]));
+        }
+        if (!localStorage.getItem('gh_movimentacoes')) {
+            localStorage.setItem('gh_movimentacoes', JSON.stringify([
+                { id_movimentacao: 1, id_produto: 1, nome_produto: "Mouse Sem Fio USB", tipo_movimentacao: "ENTRADA", quantidade: 20, valor_unitario: 25.00, data_movimentacao: "2026-07-25 10:30:00", observacao: "Estoque inicial", id_unidade: 1, nome_unidade: "Unidade Matriz" }
+            ]));
+        }
+    },
+
+    get(key) {
+        this.init();
+        return JSON.parse(localStorage.getItem('gh_' + key) || '[]');
+    },
+
+    set(key, data) {
+        localStorage.setItem('gh_' + key, JSON.stringify(data));
+    },
+
+    calcularEstoqueProduto(id_produto, id_unidade = null) {
+        const movs = this.get('movimentacoes').filter(m => m.id_produto == id_produto);
+        let entradas = 0, saidas = 0;
+        movs.forEach(m => {
+            if (!id_unidade || m.id_unidade == id_unidade) {
+                if (m.tipo_movimentacao === 'ENTRADA') entradas += parseInt(m.quantidade);
+                if (m.tipo_movimentacao === 'SAIDA') saidas += parseInt(m.quantidade);
+            }
+        });
+        return entradas - saidas;
+    },
+
+    dispatch(url, options = {}) {
+        this.init();
+        const method = (options.method || 'GET').toUpperCase();
+        const body = options.body ? JSON.parse(options.body) : {};
+        const urlObj = new URL(url, window.location.origin);
+        const path = urlObj.pathname;
+        const params = urlObj.searchParams;
+
+        // AUTH LOGIN
+        if (path === '/api/auth/login' && method === 'POST') {
+            const users = this.get('usuarios');
+            const user = users.find(u => u.usuario === body.usuario && u.senha === body.senha);
+            if (!user) return { success: false, message: 'Usuário ou senha incorretos!' };
+            if (user.status_aprovacao !== 'Aprovado') return { success: false, message: 'Sua conta aguarda aprovação do administrador.' };
+            return { success: true, message: `Bem-vindo, ${user.nome_usuario}!`, user };
+        }
+
+        // AUTH REGISTER
+        if (path === '/api/auth/register' && method === 'POST') {
+            const users = this.get('usuarios');
+            if (users.find(u => u.usuario === body.usuario)) return { success: false, message: 'Nome de usuário já cadastrado!' };
+            const newUser = {
+                id_usuario: Date.now(),
+                usuario: body.usuario,
+                senha: body.senha,
+                nome_usuario: body.nome_usuario,
+                nivel_acesso: 'Operador',
+                id_unidade: null,
+                status_aprovacao: 'Pendente',
+                nome_unidade: 'Não Atrelado'
+            };
+            users.push(newUser);
+            this.set('usuarios', users);
+            return { success: true, message: 'Cadastro realizado com sucesso! Aguarde aprovação do administrador.' };
+        }
+
+        // GET USERS
+        if (path === '/api/auth/users' && method === 'GET') {
+            return { success: true, users: this.get('usuarios') };
+        }
+
+        // APROVAR USER
+        if (path.match(/\/api\/auth\/users\/\d+\/aprovar/) && method === 'POST') {
+            const id = path.split('/')[4];
+            const users = this.get('usuarios');
+            const units = this.get('unidades');
+            const u = users.find(x => x.id_usuario == id);
+            if (u) {
+                u.status_aprovacao = 'Aprovado';
+                u.id_unidade = body.id_unidade;
+                u.nivel_acesso = body.nivel_acesso || 'Operador';
+                const unitObj = units.find(x => x.id_unidade == body.id_unidade);
+                u.nome_unidade = unitObj ? unitObj.nome_unidade : 'Sem Unidade';
+                this.set('usuarios', users);
+                return { success: true, message: 'Usuário aprovado com sucesso!' };
+            }
+        }
+
+        // EDITAR USER
+        if (path.match(/\/api\/auth\/users\/\d+\/editar/) && method === 'POST') {
+            const id = path.split('/')[4];
+            const users = this.get('usuarios');
+            const units = this.get('unidades');
+            const u = users.find(x => x.id_usuario == id);
+            if (u) {
+                u.id_unidade = body.id_unidade;
+                u.nivel_acesso = body.nivel_acesso || 'Operador';
+                const unitObj = units.find(x => x.id_unidade == body.id_unidade);
+                u.nome_unidade = unitObj ? unitObj.nome_unidade : 'Sem Unidade';
+                this.set('usuarios', users);
+                return { success: true, message: 'Unidade operacional do usuário atualizada!' };
+            }
+        }
+
+        // REJEITAR USER
+        if (path.match(/\/api\/auth\/users\/\d+\/rejeitar/) && method === 'POST') {
+            const id = path.split('/')[4];
+            const users = this.get('usuarios');
+            const u = users.find(x => x.id_usuario == id);
+            if (u) {
+                u.status_aprovacao = 'Rejeitado';
+                this.set('usuarios', users);
+                return { success: true, message: 'Cadastro rejeitado.' };
+            }
+        }
+
+        // UNIDADES
+        if (path === '/api/unidades') {
+            const units = this.get('unidades');
+            if (method === 'GET') return { success: true, unidades: units };
+            if (method === 'POST') {
+                if (body.id_unidade) {
+                    const u = units.find(x => x.id_unidade == body.id_unidade);
+                    if (u) {
+                        u.nome_unidade = body.nome_unidade;
+                        u.endereco = body.endereco;
+                        u.cnpj = body.cnpj;
+                    }
+                } else {
+                    units.push({
+                        id_unidade: Date.now(),
+                        nome_unidade: body.nome_unidade,
+                        endereco: body.endereco,
+                        cnpj: body.cnpj
+                    });
+                }
+                this.set('unidades', units);
+                return { success: true, message: 'Unidade salva com sucesso!' };
+            }
+        }
+
+        // CATEGORIAS
+        if (path === '/api/categorias') {
+            const cats = this.get('categorias');
+            if (method === 'GET') return { success: true, categorias: cats };
+            if (method === 'POST') {
+                cats.push({ id_categoria: Date.now(), nome_categoria: body.nome_categoria });
+                this.set('categorias', cats);
+                return { success: true, message: 'Categoria cadastrada!' };
+            }
+        }
+
+        // FORNECEDORES
+        if (path === '/api/fornecedores') {
+            const forns = this.get('fornecedores');
+            if (method === 'GET') return { success: true, fornecedores: forns };
+            if (method === 'POST') {
+                forns.push({ id_fornecedor: Date.now(), ...body });
+                this.set('fornecedores', forns);
+                return { success: true, message: 'Fornecedor cadastrado!' };
+            }
+        }
+
+        // PRODUTOS GET
+        if (path === '/api/produtos' && method === 'GET') {
+            const busca = (params.get('busca') || '').toLowerCase();
+            const catId = params.get('categoria_id');
+            const unidId = params.get('id_unidade');
+
+            let prods = this.get('produtos');
+            if (busca) prods = prods.filter(p => p.nome_produto.toLowerCase().includes(busca) || (p.codigo_barras && p.codigo_barras.includes(busca)));
+            if (catId) prods = prods.filter(p => p.id_categoria == catId);
+
+            const resultProds = prods.map(p => {
+                const estAtual = this.calcularEstoqueProduto(p.id_produto, unidId);
+                const estMin = p.estoque_minimo || 0;
+                let status = "Normal";
+                if (estAtual <= 0) status = "Zerado";
+                else if (estAtual <= estMin) status = "Baixo";
+                return { ...p, estoque_atual: estAtual, status_estoque: status };
+            });
+
+            return { success: true, produtos: resultProds };
+        }
+
+        // PRODUTO SINGLE GET
+        if (path.match(/\/api\/produtos\/\d+$/) && method === 'GET') {
+            const id = path.split('/')[3];
+            const unidId = params.get('id_unidade');
+            const p = this.get('produtos').find(x => x.id_produto == id);
+            if (!p) return { success: false, message: 'Produto não encontrado.' };
+            const estAtual = this.calcularEstoqueProduto(p.id_produto, unidId);
+            return { success: true, produto: { ...p, estoque_atual: estAtual } };
+        }
+
+        // PRODUTO POST
+        if (path === '/api/produtos' && method === 'POST') {
+            const prods = this.get('produtos');
+            const cats = this.get('categorias');
+            const forns = this.get('fornecedores');
+            const units = this.get('unidades');
+
+            const cat = cats.find(c => c.id_categoria == body.id_categoria);
+            const forn = forns.find(f => f.id_fornecedor == body.id_fornecedor);
+            const unit = units.find(u => u.id_unidade == body.id_unidade);
+
+            if (body.id_produto) {
+                const p = prods.find(x => x.id_produto == body.id_produto);
+                if (p) {
+                    Object.assign(p, body);
+                    p.nome_categoria = cat ? cat.nome_categoria : 'Sem Categoria';
+                    p.nome_fornecedor = forn ? forn.nome_fornecedor : 'Sem Fornecedor';
+                    p.nome_unidade = unit ? unit.nome_unidade : 'Todas';
+                }
+            } else {
+                prods.push({
+                    id_produto: Date.now(),
+                    ...body,
+                    data_cadastro: new Date().toISOString().replace('T', ' ').substring(0, 19),
+                    nome_categoria: cat ? cat.nome_categoria : 'Sem Categoria',
+                    nome_fornecedor: forn ? forn.nome_fornecedor : 'Sem Fornecedor',
+                    nome_unidade: unit ? unit.nome_unidade : 'Todas'
+                });
+            }
+            this.set('produtos', prods);
+            return { success: true, message: 'Produto salvo com sucesso!' };
+        }
+
+        // PRODUTO DELETE
+        if (path.match(/\/api\/produtos\/\d+$/) && method === 'DELETE') {
+            const id = path.split('/')[3];
+            let prods = this.get('produtos').filter(x => x.id_produto != id);
+            let movs = this.get('movimentacoes').filter(x => x.id_produto != id);
+            this.set('produtos', prods);
+            this.set('movimentacoes', movs);
+            return { success: true, message: 'Produto excluído.' };
+        }
+
+        // MOVIMENTACOES GET
+        if (path === '/api/movimentacoes' && method === 'GET') {
+            const unidId = params.get('id_unidade');
+            let movs = this.get('movimentacoes');
+            if (unidId) movs = movs.filter(m => m.id_unidade == unidId);
+            movs.sort((a, b) => new Date(b.data_movimentacao) - new Date(a.data_movimentacao));
+            return { success: true, movimentacoes: movs };
+        }
+
+        // MOVIMENTACOES POST
+        if (path === '/api/movimentacoes' && method === 'POST') {
+            const movs = this.get('movimentacoes');
+            const prods = this.get('produtos');
+            const units = this.get('unidades');
+
+            const prod = prods.find(p => p.id_produto == body.id_produto);
+            if (!prod) return { success: false, message: 'Produto não encontrado.' };
+
+            if (body.tipo_movimentacao === 'SAIDA') {
+                const estAtual = this.calcularEstoqueProduto(body.id_produto, body.id_unidade);
+                if (parseInt(body.quantidade) > estAtual) {
+                    return { success: false, message: `Estoque insuficiente! Saldo disponível: ${estAtual} unidade(s).` };
+                }
+            }
+
+            const unit = units.find(u => u.id_unidade == body.id_unidade);
+            movs.push({
+                id_movimentacao: Date.now(),
+                id_produto: parseInt(body.id_produto),
+                nome_produto: prod.nome_produto,
+                tipo_movimentacao: body.tipo_movimentacao,
+                quantidade: parseInt(body.quantidade),
+                valor_unitario: parseFloat(body.valor_unitario),
+                data_movimentacao: body.data_movimentacao || new Date().toISOString(),
+                observacao: body.observacao || '',
+                id_unidade: parseInt(body.id_unidade),
+                nome_unidade: unit ? unit.nome_unidade : 'Sem Unidade'
+            });
+
+            this.set('movimentacoes', movs);
+            return { success: true, message: 'Movimentação registrada com sucesso!' };
+        }
+
+        // DASHBOARD
+        if (path === '/api/dashboard') {
+            const unidId = params.get('id_unidade');
+            const prods = this.dispatch('/api/produtos?id_unidade=' + (unidId || ''), { method: 'GET' }).produtos;
+            const movs = this.dispatch('/api/movimentacoes?id_unidade=' + (unidId || ''), { method: 'GET' }).movimentacoes;
+
+            const totalProds = prods.length;
+            const totalItens = prods.reduce((acc, p) => acc + p.estoque_atual, 0);
+            const totalCusto = prods.reduce((acc, p) => acc + (p.estoque_atual > 0 ? p.estoque_atual * p.preco_custo : 0), 0);
+            const totalVenda = prods.reduce((acc, p) => acc + (p.estoque_atual > 0 ? p.estoque_atual * p.preco_venda : 0), 0);
+            const criticos = prods.filter(p => p.status_estoque === 'Baixo' || p.status_estoque === 'Zerado');
+
+            return {
+                success: true,
+                data: {
+                    total_produtos: totalProds,
+                    total_estoque_itens: totalItens,
+                    valor_total_custo: totalCusto,
+                    valor_total_venda: totalVenda,
+                    qtd_baixo_estoque: criticos.length,
+                    produtos_baixo_estoque: criticos.slice(0, 5),
+                    movimentacoes_recentes: movs.slice(0, 10)
+                }
+            };
+        }
+
+        return { success: false, message: 'Rota não encontrada' };
+    }
+};
+
+// Funçao auxiliar para realizar chamadas API ou redirecionar para LocalDB no GitHub Pages
+async function safeFetch(url, options = {}) {
+    // Se estiver rodando estático no GitHub Pages ou arquivo local
+    if (window.location.protocol === 'file:' || window.location.hostname.includes('github.io')) {
+        return LocalDB.dispatch(url, options);
+    }
+
+    try {
+        const res = await fetch(url, options);
+        if (res.status === 404) throw new Error("API não encontrada, alternando para LocalDB");
+        return await res.json();
+    } catch (e) {
+        // Fallback automático se o servidor não estiver respondendo
+        return LocalDB.dispatch(url, options);
+    }
+}
 
 // Inicialização da aplicação ao carregar a página
 document.addEventListener('DOMContentLoaded', () => {
@@ -57,24 +414,19 @@ async function handleLogin(event) {
     const usuario = document.getElementById('login-usuario').value.trim();
     const senha = document.getElementById('login-senha').value.trim();
 
-    try {
-        const response = await fetch('/api/auth/login', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ usuario, senha })
-        });
-        const data = await response.json();
+    const data = await safeFetch('/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ usuario, senha })
+    });
 
-        if (data.success) {
-            currentUser = data.user;
-            localStorage.setItem('stock_user', JSON.stringify(currentUser));
-            showToast(data.message, 'success');
-            iniciarAplicacao();
-        } else {
-            showToast(data.message, 'error');
-        }
-    } catch (error) {
-        showToast('Erro ao se conectar ao servidor.', 'error');
+    if (data.success) {
+        currentUser = data.user;
+        localStorage.setItem('stock_user', JSON.stringify(currentUser));
+        showToast(data.message, 'success');
+        iniciarAplicacao();
+    } else {
+        showToast(data.message, 'error');
     }
 }
 
@@ -84,23 +436,18 @@ async function handleRegister(event) {
     const usuario = document.getElementById('reg-usuario').value.trim();
     const senha = document.getElementById('reg-senha').value.trim();
 
-    try {
-        const response = await fetch('/api/auth/register', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ nome_usuario, usuario, senha })
-        });
-        const data = await response.json();
+    const data = await safeFetch('/api/auth/register', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ nome_usuario, usuario, senha })
+    });
 
-        if (data.success) {
-            showToast(data.message, 'success');
-            document.getElementById('form-register').reset();
-            toggleAuthMode('login');
-        } else {
-            showToast(data.message, 'error');
-        }
-    } catch (error) {
-        showToast('Erro ao cadastrar usuário.', 'error');
+    if (data.success) {
+        showToast(data.message, 'success');
+        document.getElementById('form-register').reset();
+        toggleAuthMode('login');
+    } else {
+        showToast(data.message, 'error');
     }
 }
 
@@ -121,7 +468,6 @@ async function iniciarAplicacao() {
     document.getElementById('auth-screen').classList.add('hidden');
     document.getElementById('main-app').classList.remove('hidden');
 
-    // Atualizar UI do Usuário no Sidebar
     document.getElementById('user-display-name').textContent = currentUser.nome_usuario;
     document.getElementById('user-display-role').textContent = currentUser.nivel_acesso;
     
@@ -130,23 +476,19 @@ async function iniciarAplicacao() {
         unitEl.textContent = currentUser.nome_unidade ? `Unidade: ${currentUser.nome_unidade}` : '';
     }
 
-    // Configurar Seletor Global de Unidades Operacionais
     const selectGlobal = document.getElementById('select-global-unidade');
     if (currentUser.nivel_acesso === 'Administrador') {
-        try {
-            const resU = await fetch('/api/unidades');
-            const dataU = await resU.json();
-            if (dataU.success) {
-                unidadesCache = dataU.unidades;
-                selectGlobal.innerHTML = '<option value="">Todas as Unidades (Visão Global)</option>' +
-                    unidadesCache.map(u => `<option value="${u.id_unidade}">${u.nome_unidade}</option>`).join('');
-                
-                const savedAdminUnit = localStorage.getItem('admin_selected_unit') || '';
-                selectGlobal.value = savedAdminUnit;
-                selectedUnitId = savedAdminUnit ? parseInt(savedAdminUnit) : null;
-                selectGlobal.disabled = false;
-            }
-        } catch (e) {}
+        const dataU = await safeFetch('/api/unidades');
+        if (dataU.success) {
+            unidadesCache = dataU.unidades;
+            selectGlobal.innerHTML = '<option value="">Todas as Unidades (Visão Global)</option>' +
+                unidadesCache.map(u => `<option value="${u.id_unidade}">${u.nome_unidade}</option>`).join('');
+            
+            const savedAdminUnit = localStorage.getItem('admin_selected_unit') || '';
+            selectGlobal.value = savedAdminUnit;
+            selectedUnitId = savedAdminUnit ? parseInt(savedAdminUnit) : null;
+            selectGlobal.disabled = false;
+        }
     } else {
         selectedUnitId = currentUser.id_unidade ? parseInt(currentUser.id_unidade) : null;
         if (selectGlobal) {
@@ -155,21 +497,15 @@ async function iniciarAplicacao() {
         }
     }
 
-    // Mostrar ou ocultar opções exclusivas de Admin
     const adminElements = document.querySelectorAll('.admin-only');
     adminElements.forEach(el => {
-        if (currentUser.nivel_acesso === 'Administrador') {
-            el.style.display = '';
-        } else {
-            el.style.display = 'none';
-        }
+        el.style.display = (currentUser.nivel_acesso === 'Administrador') ? '' : 'none';
     });
 
     if (currentUser.nivel_acesso !== 'Administrador') {
         navegarParaView('view-dashboard');
     }
 
-    // Carregar dados iniciais
     carregarCategoriasEFornecedores();
     carregarDashboard();
     carregarProdutos();
@@ -246,8 +582,7 @@ async function carregarDashboard() {
             url += `?id_unidade=${selectedUnitId}`;
         }
 
-        const response = await fetch(url);
-        const result = await response.json();
+        const result = await safeFetch(url);
 
         if (result.success) {
             const data = result.data;
@@ -293,8 +628,7 @@ async function carregarDashboard() {
 
 async function carregarUnidades() {
     try {
-        const response = await fetch('/api/unidades');
-        const result = await response.json();
+        const result = await safeFetch('/api/unidades');
 
         if (result.success) {
             unidadesCache = result.unidades;
@@ -351,24 +685,19 @@ async function salvarUnidade(event) {
         cnpj: document.getElementById('unidade-cnpj').value.trim()
     };
 
-    try {
-        const response = await fetch('/api/unidades', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload)
-        });
-        const result = await response.json();
+    const result = await safeFetch('/api/unidades', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+    });
 
-        if (result.success) {
-            showToast(result.message, 'success');
-            fecharModal('modal-unidade');
-            carregarCadastrosGerais();
-            iniciarAplicacao();
-        } else {
-            showToast(result.message, 'error');
-        }
-    } catch (e) {
-        showToast('Erro ao salvar unidade.', 'error');
+    if (result.success) {
+        showToast(result.message, 'success');
+        fecharModal('modal-unidade');
+        carregarCadastrosGerais();
+        iniciarAplicacao();
+    } else {
+        showToast(result.message, 'error');
     }
 }
 
@@ -383,16 +712,11 @@ async function carregarProdutos() {
         url += `&id_unidade=${selectedUnitId}`;
     }
 
-    try {
-        const response = await fetch(url);
-        const result = await response.json();
+    const result = await safeFetch(url);
 
-        if (result.success) {
-            produtosCache = result.produtos;
-            renderizarTabelaProdutos(produtosCache);
-        }
-    } catch (error) {
-        showToast('Erro ao carregar lista de produtos.', 'error');
+    if (result.success) {
+        produtosCache = result.produtos;
+        renderizarTabelaProdutos(produtosCache);
     }
 }
 
@@ -441,36 +765,28 @@ async function abrirModalProduto(id_produto = null) {
 
     await carregarCategoriasEFornecedores();
 
-    try {
-        const resU = await fetch('/api/unidades');
-        const dataU = await resU.json();
-        if (dataU.success) {
-            const selectU = document.getElementById('prod-unidade');
-            selectU.innerHTML = '<option value="">Todas / Padrão</option>' +
-                dataU.unidades.map(u => `<option value="${u.id_unidade}">${u.nome_unidade}</option>`).join('');
-        }
-    } catch (e) {}
+    const dataU = await safeFetch('/api/unidades');
+    if (dataU.success) {
+        const selectU = document.getElementById('prod-unidade');
+        selectU.innerHTML = '<option value="">Todas / Padrão</option>' +
+            dataU.unidades.map(u => `<option value="${u.id_unidade}">${u.nome_unidade}</option>`).join('');
+    }
 
     if (id_produto) {
-        try {
-            let pUrl = `/api/produtos/${id_produto}`;
-            if (selectedUnitId) pUrl += `?id_unidade=${selectedUnitId}`;
-            const res = await fetch(pUrl);
-            const data = await res.json();
-            if (data.success) {
-                const p = data.produto;
-                document.getElementById('prod-id').value = p.id_produto;
-                document.getElementById('prod-codigo').value = p.codigo_barras;
-                document.getElementById('prod-nome').value = p.nome_produto;
-                document.getElementById('prod-categoria').value = p.id_categoria || '';
-                document.getElementById('prod-fornecedor').value = p.id_fornecedor || '';
-                document.getElementById('prod-unidade').value = p.id_unidade || '';
-                document.getElementById('prod-minimo').value = p.estoque_minimo;
-                document.getElementById('prod-custo').value = p.preco_custo;
-                document.getElementById('prod-venda').value = p.preco_venda;
-            }
-        } catch (e) {
-            showToast('Erro ao carregar dados do produto.', 'error');
+        let pUrl = `/api/produtos/${id_produto}`;
+        if (selectedUnitId) pUrl += `?id_unidade=${selectedUnitId}`;
+        const data = await safeFetch(pUrl);
+        if (data.success) {
+            const p = data.produto;
+            document.getElementById('prod-id').value = p.id_produto;
+            document.getElementById('prod-codigo').value = p.codigo_barras;
+            document.getElementById('prod-nome').value = p.nome_produto;
+            document.getElementById('prod-categoria').value = p.id_categoria || '';
+            document.getElementById('prod-fornecedor').value = p.id_fornecedor || '';
+            document.getElementById('prod-unidade').value = p.id_unidade || '';
+            document.getElementById('prod-minimo').value = p.estoque_minimo;
+            document.getElementById('prod-custo').value = p.preco_custo;
+            document.getElementById('prod-venda').value = p.preco_venda;
         }
     }
 
@@ -491,43 +807,33 @@ async function salvarProduto(event) {
         preco_venda: document.getElementById('prod-venda').value
     };
 
-    try {
-        const response = await fetch('/api/produtos', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload)
-        });
-        const result = await response.json();
+    const result = await safeFetch('/api/produtos', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+    });
 
-        if (result.success) {
-            showToast(result.message, 'success');
-            fecharModal('modal-produto');
-            carregarProdutos();
-            carregarDashboard();
-        } else {
-            showToast(result.message, 'error');
-        }
-    } catch (error) {
-        showToast('Erro ao salvar produto.', 'error');
+    if (result.success) {
+        showToast(result.message, 'success');
+        fecharModal('modal-produto');
+        carregarProdutos();
+        carregarDashboard();
+    } else {
+        showToast(result.message, 'error');
     }
 }
 
 async function excluirProduto(id_produto) {
     if (!confirm('Tem certeza que deseja excluir este produto e todo seu histórico?')) return;
 
-    try {
-        const response = await fetch(`/api/produtos/${id_produto}`, { method: 'DELETE' });
-        const result = await response.json();
+    const result = await safeFetch(`/api/produtos/${id_produto}`, { method: 'DELETE' });
 
-        if (result.success) {
-            showToast(result.message, 'success');
-            carregarProdutos();
-            carregarDashboard();
-        } else {
-            showToast(result.message, 'error');
-        }
-    } catch (error) {
-        showToast('Erro ao excluir produto.', 'error');
+    if (result.success) {
+        showToast(result.message, 'success');
+        carregarProdutos();
+        carregarDashboard();
+    } else {
+        showToast(result.message, 'error');
     }
 }
 
@@ -549,36 +855,31 @@ async function carregarMovimentacoes() {
         url += `?id_unidade=${selectedUnitId}`;
     }
 
-    try {
-        const response = await fetch(url);
-        const result = await response.json();
+    const result = await safeFetch(url);
 
-        if (result.success) {
-            const tbody = document.getElementById('table-movimentacoes-body');
-            if (result.movimentacoes.length === 0) {
-                tbody.innerHTML = '<tr><td colspan="9" class="text-center text-muted">Nenhuma movimentação registrada.</td></tr>';
-                return;
-            }
-
-            tbody.innerHTML = result.movimentacoes.map(m => {
-                const total = m.quantidade * m.valor_unitario;
-                return `
-                    <tr>
-                        <td>#${m.id_movimentacao}</td>
-                        <td><small>${formatarData(m.data_movimentacao)}</small></td>
-                        <td><span class="badge badge-info"><i class="fa-solid fa-building"></i> ${m.nome_unidade || 'Sem Unidade'}</span></td>
-                        <td><strong>${m.nome_produto}</strong></td>
-                        <td><span class="badge ${m.tipo_movimentacao === 'ENTRADA' ? 'badge-success' : 'badge-warning'}">${m.tipo_movimentacao}</span></td>
-                        <td><strong>${m.quantidade}</strong></td>
-                        <td>${formatarMoeda(m.valor_unitario)}</td>
-                        <td><strong>${formatarMoeda(total)}</strong></td>
-                        <td><small class="text-muted">${m.observacao || '-'}</small></td>
-                    </tr>
-                `;
-            }).join('');
+    if (result.success) {
+        const tbody = document.getElementById('table-movimentacoes-body');
+        if (result.movimentacoes.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="9" class="text-center text-muted">Nenhuma movimentação registrada.</td></tr>';
+            return;
         }
-    } catch (error) {
-        showToast('Erro ao carregar histórico de movimentações.', 'error');
+
+        tbody.innerHTML = result.movimentacoes.map(m => {
+            const total = m.quantidade * m.valor_unitario;
+            return `
+                <tr>
+                    <td>#${m.id_movimentacao}</td>
+                    <td><small>${formatarData(m.data_movimentacao)}</small></td>
+                    <td><span class="badge badge-info"><i class="fa-solid fa-building"></i> ${m.nome_unidade || 'Sem Unidade'}</span></td>
+                    <td><strong>${m.nome_produto}</strong></td>
+                    <td><span class="badge ${m.tipo_movimentacao === 'ENTRADA' ? 'badge-success' : 'badge-warning'}">${m.tipo_movimentacao}</span></td>
+                    <td><strong>${m.quantidade}</strong></td>
+                    <td>${formatarMoeda(m.valor_unitario)}</td>
+                    <td><strong>${formatarMoeda(total)}</strong></td>
+                    <td><small class="text-muted">${m.observacao || '-'}</small></td>
+                </tr>
+            `;
+        }).join('');
     }
 }
 
@@ -586,7 +887,6 @@ async function abrirModalMovimentacao(tipo) {
     document.getElementById('form-movimentacao').reset();
     document.getElementById('mov-tipo').value = tipo;
     
-    // Pré-preencher data atual
     document.getElementById('mov-data').value = getFormattedLocalDateTime();
 
     const title = tipo === 'ENTRADA' ? 'Registrar Nova ENTRADA de Estoque' : 'Registrar Nova SAÍDA de Estoque';
@@ -598,29 +898,25 @@ async function abrirModalMovimentacao(tipo) {
 
     document.getElementById('mov-saldo-info').classList.add('hidden');
 
-    // Carregar unidades operacionais
     const selectU = document.getElementById('mov-unidade');
-    try {
-        const resU = await fetch('/api/unidades');
-        const dataU = await resU.json();
-        if (dataU.success) {
-            unidadesCache = dataU.unidades;
-            selectU.innerHTML = '<option value="">Selecione a Unidade...</option>' +
-                unidadesCache.map(u => `<option value="${u.id_unidade}">${u.nome_unidade}</option>`).join('');
-            
-            const defaultUnit = selectedUnitId || (currentUser ? currentUser.id_unidade : null);
-            if (defaultUnit) {
-                selectU.value = defaultUnit;
-            }
-
-            if (currentUser.nivel_acesso !== 'Administrador') {
-                selectU.value = currentUser.id_unidade;
-                selectU.disabled = true;
-            } else {
-                selectU.disabled = false;
-            }
+    const dataU = await safeFetch('/api/unidades');
+    if (dataU.success) {
+        unidadesCache = dataU.unidades;
+        selectU.innerHTML = '<option value="">Selecione a Unidade...</option>' +
+            unidadesCache.map(u => `<option value="${u.id_unidade}">${u.nome_unidade}</option>`).join('');
+        
+        const defaultUnit = selectedUnitId || (currentUser ? currentUser.id_unidade : null);
+        if (defaultUnit) {
+            selectU.value = defaultUnit;
         }
-    } catch (e) {}
+
+        if (currentUser.nivel_acesso !== 'Administrador') {
+            selectU.value = currentUser.id_unidade;
+            selectU.disabled = true;
+        } else {
+            selectU.disabled = false;
+        }
+    }
 
     await atualizarProdutosPorUnidadeMovimentacao();
     document.getElementById('modal-movimentacao').classList.remove('hidden');
@@ -631,20 +927,15 @@ async function atualizarProdutosPorUnidadeMovimentacao() {
     const selectProd = document.getElementById('mov-produto');
     document.getElementById('mov-saldo-info').classList.add('hidden');
 
-    try {
-        let prodUrl = '/api/produtos';
-        if (movUnid) {
-            prodUrl += `?id_unidade=${movUnid}`;
-        }
-        const response = await fetch(prodUrl);
-        const data = await response.json();
-        if (data.success) {
-            produtosCache = data.produtos;
-            selectProd.innerHTML = '<option value="">Selecione um produto...</option>' +
-                produtosCache.map(p => `<option value="${p.id_produto}">${p.nome_produto} (Saldo na Unidade: ${p.estoque_atual})</option>`).join('');
-        }
-    } catch (e) {
-        showToast('Erro ao carregar produtos para a unidade.', 'error');
+    let prodUrl = '/api/produtos';
+    if (movUnid) {
+        prodUrl += `?id_unidade=${movUnid}`;
+    }
+    const data = await safeFetch(prodUrl);
+    if (data.success) {
+        produtosCache = data.produtos;
+        selectProd.innerHTML = '<option value="">Selecione um produto...</option>' +
+            produtosCache.map(p => `<option value="${p.id_produto}">${p.nome_produto} (Saldo na Unidade: ${p.estoque_atual})</option>`).join('');
     }
 }
 
@@ -690,59 +981,45 @@ async function salvarMovimentacao(event) {
         id_unidade: parseInt(movUnid)
     };
 
-    try {
-        const response = await fetch('/api/movimentacoes', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload)
-        });
-        const result = await response.json();
+    const result = await safeFetch('/api/movimentacoes', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+    });
 
-        if (result.success) {
-            showToast(result.message, 'success');
-            fecharModal('modal-movimentacao');
-            carregarMovimentacoes();
-            carregarProdutos();
-            carregarDashboard();
-        } else {
-            showToast(result.message, 'error');
-        }
-    } catch (error) {
-        showToast('Erro ao registrar movimentação.', 'error');
+    if (result.success) {
+        showToast(result.message, 'success');
+        fecharModal('modal-movimentacao');
+        carregarMovimentacoes();
+        carregarProdutos();
+        carregarDashboard();
+    } else {
+        showToast(result.message, 'error');
     }
 }
 
 // --- CATEGORIAS, FORNECEDORES & UNIDADES ---
 
 async function carregarCategoriasEFornecedores() {
-    try {
-        const [resCat, resForn] = await Promise.all([
-            fetch('/api/categorias'),
-            fetch('/api/fornecedores')
-        ]);
+    const dataCat = await safeFetch('/api/categorias');
+    const dataForn = await safeFetch('/api/fornecedores');
+
+    if (dataCat.success) {
+        categoriasCache = dataCat.categorias;
+        const selectProdCat = document.getElementById('prod-categoria');
+        const selectFilterCat = document.getElementById('filter-produto-categoria');
         
-        const dataCat = await resCat.json();
-        const dataForn = await resForn.json();
+        const optionsHtml = categoriasCache.map(c => `<option value="${c.id_categoria}">${c.nome_categoria}</option>`).join('');
+        if (selectProdCat) selectProdCat.innerHTML = '<option value="">Selecione...</option>' + optionsHtml;
+        if (selectFilterCat) selectFilterCat.innerHTML = '<option value="">Todas as Categorias</option>' + optionsHtml;
+    }
 
-        if (dataCat.success) {
-            categoriasCache = dataCat.categorias;
-            const selectProdCat = document.getElementById('prod-categoria');
-            const selectFilterCat = document.getElementById('filter-produto-categoria');
-            
-            const optionsHtml = categoriasCache.map(c => `<option value="${c.id_categoria}">${c.nome_categoria}</option>`).join('');
-            if (selectProdCat) selectProdCat.innerHTML = '<option value="">Selecione...</option>' + optionsHtml;
-            if (selectFilterCat) selectFilterCat.innerHTML = '<option value="">Todas as Categorias</option>' + optionsHtml;
+    if (dataForn.success) {
+        const selectForn = document.getElementById('prod-fornecedor');
+        if (selectForn) {
+            selectForn.innerHTML = '<option value="">Selecione...</option>' +
+                dataForn.fornecedores.map(f => `<option value="${f.id_fornecedor}">${f.nome_fornecedor}</option>`).join('');
         }
-
-        if (dataForn.success) {
-            const selectForn = document.getElementById('prod-fornecedor');
-            if (selectForn) {
-                selectForn.innerHTML = '<option value="">Selecione...</option>' +
-                    dataForn.fornecedores.map(f => `<option value="${f.id_fornecedor}">${f.nome_fornecedor}</option>`).join('');
-            }
-        }
-    } catch (e) {
-        console.error('Erro ao carregar listas de apoio:', e);
     }
 }
 
@@ -750,35 +1027,33 @@ async function carregarCadastrosGerais() {
     carregarUnidades();
     carregarCategoriasEFornecedores();
 
-    fetch('/api/categorias').then(res => res.json()).then(data => {
-        if (data.success) {
-            const tbody = document.getElementById('table-categorias-body');
-            if (tbody) {
-                tbody.innerHTML = data.categorias.map(c => `
-                    <tr>
-                        <td>#${c.id_categoria}</td>
-                        <td><strong>${c.nome_categoria}</strong></td>
-                    </tr>
-                `).join('');
-            }
+    const dataCat = await safeFetch('/api/categorias');
+    if (dataCat.success) {
+        const tbody = document.getElementById('table-categorias-body');
+        if (tbody) {
+            tbody.innerHTML = dataCat.categorias.map(c => `
+                <tr>
+                    <td>#${c.id_categoria}</td>
+                    <td><strong>${c.nome_categoria}</strong></td>
+                </tr>
+            `).join('');
         }
-    });
+    }
 
-    fetch('/api/fornecedores').then(res => res.json()).then(data => {
-        if (data.success) {
-            const tbody = document.getElementById('table-fornecedores-body');
-            if (tbody) {
-                tbody.innerHTML = data.fornecedores.map(f => `
-                    <tr>
-                        <td><strong>${f.nome_fornecedor}</strong></td>
-                        <td>${f.cnpj_cpf || '-'}</td>
-                        <td>${f.telefone || '-'}</td>
-                        <td>${f.email || '-'}</td>
-                    </tr>
-                `).join('');
-            }
+    const dataForn = await safeFetch('/api/fornecedores');
+    if (dataForn.success) {
+        const tbody = document.getElementById('table-fornecedores-body');
+        if (tbody) {
+            tbody.innerHTML = dataForn.fornecedores.map(f => `
+                <tr>
+                    <td><strong>${f.nome_fornecedor}</strong></td>
+                    <td>${f.cnpj_cpf || '-'}</td>
+                    <td>${f.telefone || '-'}</td>
+                    <td>${f.email || '-'}</td>
+                </tr>
+            `).join('');
         }
-    });
+    }
 }
 
 function abrirModalCategoria() {
@@ -790,23 +1065,18 @@ async function salvarCategoria(event) {
     event.preventDefault();
     const nome_categoria = document.getElementById('cat-nome').value.trim();
 
-    try {
-        const response = await fetch('/api/categorias', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ nome_categoria })
-        });
-        const result = await response.json();
+    const result = await safeFetch('/api/categorias', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ nome_categoria })
+    });
 
-        if (result.success) {
-            showToast(result.message, 'success');
-            fecharModal('modal-categoria');
-            carregarCadastrosGerais();
-        } else {
-            showToast(result.message, 'error');
-        }
-    } catch (e) {
-        showToast('Erro ao salvar categoria.', 'error');
+    if (result.success) {
+        showToast(result.message, 'success');
+        fecharModal('modal-categoria');
+        carregarCadastrosGerais();
+    } else {
+        showToast(result.message, 'error');
     }
 }
 
@@ -824,73 +1094,63 @@ async function salvarFornecedor(event) {
         email: document.getElementById('forn-email').value.trim()
     };
 
-    try {
-        const response = await fetch('/api/fornecedores', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload)
-        });
-        const result = await response.json();
+    const result = await safeFetch('/api/fornecedores', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+    });
 
-        if (result.success) {
-            showToast(result.message, 'success');
-            fecharModal('modal-fornecedor');
-            carregarCadastrosGerais();
-        } else {
-            showToast(result.message, 'error');
-        }
-    } catch (e) {
-        showToast('Erro ao salvar fornecedor.', 'error');
+    if (result.success) {
+        showToast(result.message, 'success');
+        fecharModal('modal-fornecedor');
+        carregarCadastrosGerais();
+    } else {
+        showToast(result.message, 'error');
     }
 }
 
 // --- USUÁRIOS E APROVAÇÃO ---
 
 async function carregarUsuarios() {
-    try {
-        const response = await fetch('/api/auth/users');
-        const result = await response.json();
+    const result = await safeFetch('/api/auth/users');
 
-        if (result.success) {
-            const tbody = document.getElementById('table-usuarios-body');
-            tbody.innerHTML = result.users.map(u => {
-                let statusBadge = 'badge-success';
-                if (u.status_aprovacao === 'Pendente') statusBadge = 'badge-warning';
-                if (u.status_aprovacao === 'Rejeitado') statusBadge = 'badge-danger';
+    if (result.success) {
+        const tbody = document.getElementById('table-usuarios-body');
+        tbody.innerHTML = result.users.map(u => {
+            let statusBadge = 'badge-success';
+            if (u.status_aprovacao === 'Pendente') statusBadge = 'badge-warning';
+            if (u.status_aprovacao === 'Rejeitado') statusBadge = 'badge-danger';
 
-                let acoesHtml = '';
-                if (u.status_aprovacao === 'Pendente') {
-                    acoesHtml = `
-                        <button class="btn btn-sm btn-success" onclick="abrirModalUsuario(${u.id_usuario}, '${u.nome_usuario}', ${u.id_unidade || 'null'}, '${u.nivel_acesso}', 'aprovar')" title="Aprovar Cadastro">
-                            <i class="fa-solid fa-check"></i> Aprovar
-                        </button>
-                        <button class="btn btn-sm btn-danger" onclick="rejeitarUsuario(${u.id_usuario})" title="Rejeitar Cadastro">
-                            <i class="fa-solid fa-xmark"></i> Rejeitar
-                        </button>
-                    `;
-                } else {
-                    acoesHtml = `
-                        <button class="btn btn-sm btn-outline" onclick="abrirModalUsuario(${u.id_usuario}, '${u.nome_usuario}', ${u.id_unidade || 'null'}, '${u.nivel_acesso}', 'editar')" title="Editar Unidade / Nível">
-                            <i class="fa-solid fa-pen-to-square"></i> Editar
-                        </button>
-                    `;
-                }
-
-                return `
-                    <tr>
-                        <td>#${u.id_usuario}</td>
-                        <td><strong>${u.nome_usuario}</strong></td>
-                        <td><code>${u.usuario}</code></td>
-                        <td><span class="badge ${u.nivel_acesso === 'Administrador' ? 'badge-info' : 'badge-secondary'}">${u.nivel_acesso}</span></td>
-                        <td>${u.nome_unidade || 'Sem Unidade'}</td>
-                        <td><span class="badge ${statusBadge}">${u.status_aprovacao || 'Aprovado'}</span></td>
-                        <td class="text-right">${acoesHtml}</td>
-                    </tr>
+            let acoesHtml = '';
+            if (u.status_aprovacao === 'Pendente') {
+                acoesHtml = `
+                    <button class="btn btn-sm btn-success" onclick="abrirModalUsuario(${u.id_usuario}, '${u.nome_usuario}', ${u.id_unidade || 'null'}, '${u.nivel_acesso}', 'aprovar')" title="Aprovar Cadastro">
+                        <i class="fa-solid fa-check"></i> Aprovar
+                    </button>
+                    <button class="btn btn-sm btn-danger" onclick="rejeitarUsuario(${u.id_usuario})" title="Rejeitar Cadastro">
+                        <i class="fa-solid fa-xmark"></i> Rejeitar
+                    </button>
                 `;
-            }).join('');
-        }
-    } catch (e) {
-        showToast('Erro ao carregar lista de usuários.', 'error');
+            } else {
+                acoesHtml = `
+                    <button class="btn btn-sm btn-outline" onclick="abrirModalUsuario(${u.id_usuario}, '${u.nome_usuario}', ${u.id_unidade || 'null'}, '${u.nivel_acesso}', 'editar')" title="Editar Unidade / Nível">
+                        <i class="fa-solid fa-pen-to-square"></i> Editar
+                    </button>
+                `;
+            }
+
+            return `
+                <tr>
+                    <td>#${u.id_usuario}</td>
+                    <td><strong>${u.nome_usuario}</strong></td>
+                    <td><code>${u.usuario}</code></td>
+                    <td><span class="badge ${u.nivel_acesso === 'Administrador' ? 'badge-info' : 'badge-secondary'}">${u.nivel_acesso}</span></td>
+                    <td>${u.nome_unidade || 'Sem Unidade'}</td>
+                    <td><span class="badge ${statusBadge}">${u.status_aprovacao || 'Aprovado'}</span></td>
+                    <td class="text-right">${acoesHtml}</td>
+                </tr>
+            `;
+        }).join('');
     }
 }
 
@@ -902,20 +1162,17 @@ async function abrirModalUsuario(id_usuario, nome_usuario, id_unidade_atual, niv
     const title = modo === 'aprovar' ? 'Aprovar e Vincular Usuário' : 'Editar Unidade e Nível de Acesso';
     document.getElementById('modal-user-title').textContent = title;
 
-    try {
-        const res = await fetch('/api/unidades');
-        const data = await res.json();
-        if (data.success) {
-            unidadesCache = data.unidades;
-            const selectU = document.getElementById('aprovar-unidade');
-            selectU.innerHTML = '<option value="">Selecione a Unidade...</option>' +
-                data.unidades.map(u => `<option value="${u.id_unidade}">${u.nome_unidade}</option>`).join('');
-            
-            if (id_unidade_atual && id_unidade_atual !== 'null') {
-                selectU.value = id_unidade_atual;
-            }
+    const data = await safeFetch('/api/unidades');
+    if (data.success) {
+        unidadesCache = data.unidades;
+        const selectU = document.getElementById('aprovar-unidade');
+        selectU.innerHTML = '<option value="">Selecione a Unidade...</option>' +
+            data.unidades.map(u => `<option value="${u.id_unidade}">${u.nome_unidade}</option>`).join('');
+        
+        if (id_unidade_atual && id_unidade_atual !== 'null') {
+            selectU.value = id_unidade_atual;
         }
-    } catch (e) {}
+    }
 
     if (nivel_atual) {
         document.getElementById('aprovar-nivel').value = nivel_atual;
@@ -940,50 +1197,40 @@ async function salvarAprovacaoOuEdicaoUsuario(event) {
         ? `/api/auth/users/${userId}/aprovar` 
         : `/api/auth/users/${userId}/editar`;
 
-    try {
-        const response = await fetch(endpoint, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ id_unidade, nivel_acesso })
-        });
-        const result = await response.json();
+    const result = await safeFetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id_unidade, nivel_acesso })
+    });
 
-        if (result.success) {
-            showToast(result.message, 'success');
-            fecharModal('modal-aprovar-usuario');
-            carregarUsuarios();
+    if (result.success) {
+        showToast(result.message, 'success');
+        fecharModal('modal-aprovar-usuario');
+        carregarUsuarios();
 
-            if (currentUser && currentUser.id_usuario == userId) {
-                currentUser.id_unidade = id_unidade;
-                currentUser.nivel_acesso = nivel_acesso;
-                const unitObj = unidadesCache.find(u => u.id_unidade == id_unidade);
-                if (unitObj) currentUser.nome_unidade = unitObj.nome_unidade;
-                localStorage.setItem('stock_user', JSON.stringify(currentUser));
-                iniciarAplicacao();
-            }
-        } else {
-            showToast(result.message, 'error');
+        if (currentUser && currentUser.id_usuario == userId) {
+            currentUser.id_unidade = id_unidade;
+            currentUser.nivel_acesso = nivel_acesso;
+            const unitObj = unidadesCache.find(u => u.id_unidade == id_unidade);
+            if (unitObj) currentUser.nome_unidade = unitObj.nome_unidade;
+            localStorage.setItem('stock_user', JSON.stringify(currentUser));
+            iniciarAplicacao();
         }
-    } catch (e) {
-        showToast('Erro ao salvar alterações do usuário.', 'error');
+    } else {
+        showToast(result.message, 'error');
     }
 }
 
 async function rejeitarUsuario(id_usuario) {
     if (!confirm('Deseja rejeitar este usuário?')) return;
 
-    try {
-        const response = await fetch(`/api/auth/users/${id_usuario}/rejeitar`, { method: 'POST' });
-        const result = await response.json();
+    const result = await safeFetch(`/api/auth/users/${id_usuario}/rejeitar`, { method: 'POST' });
 
-        if (result.success) {
-            showToast(result.message, 'success');
-            carregarUsuarios();
-        } else {
-            showToast(result.message, 'error');
-        }
-    } catch (e) {
-        showToast('Erro ao rejeitar usuário.', 'error');
+    if (result.success) {
+        showToast(result.message, 'success');
+        carregarUsuarios();
+    } else {
+        showToast(result.message, 'error');
     }
 }
 
