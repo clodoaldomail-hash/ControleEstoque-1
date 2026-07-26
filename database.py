@@ -1,37 +1,145 @@
 import os
-import pyodbc
+import sqlite3
 from datetime import datetime
 
-# Definir caminho do banco de dados MS Access (.accdb)
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 PARENT_DIR = os.path.dirname(BASE_DIR)
 
-# Tenta encontrar o arquivo accdb na pasta atual ou na pasta pai
-DB_PATH = os.path.join(BASE_DIR, "ControleEstoque.accdb")
-if not os.path.exists(DB_PATH) and os.path.exists(os.path.join(PARENT_DIR, "ControleEstoque.accdb")):
-    DB_PATH = os.path.join(PARENT_DIR, "ControleEstoque.accdb")
+# Caminhos dos bancos
+ACCDB_PATH = os.path.join(BASE_DIR, "ControleEstoque.accdb")
+SQLITE_DB_PATH = os.path.join(BASE_DIR, "ControleEstoque.db")
 
-CONN_STR = f"DRIVER={{Microsoft Access Driver (*.mdb, *.accdb)}};DBQ={DB_PATH};"
+IS_SQLITE = True
+pyodbc = None
+
+# Tenta carregar pyodbc e MS Access se estiver em ambiente Windows com driver instalado
+try:
+    import pyodbc as pyodbc_module
+    pyodbc = pyodbc_module
+    conn_str = f"DRIVER={{Microsoft Access Driver (*.mdb, *.accdb)}};DBQ={ACCDB_PATH};"
+    test_conn = pyodbc.connect(conn_str, autocommit=True)
+    test_conn.close()
+    IS_SQLITE = False
+    print("[BANCO] Usando banco de dados MS Access (.accdb)")
+except Exception:
+    IS_SQLITE = True
+    print("[BANCO] Usando banco de dados SQLite (.db) para ambiente de Nuvem")
 
 def get_db_connection():
-    """Retorna uma conexão ativa com o banco Access pyodbc."""
-    if not os.path.exists(DB_PATH):
-        init_db()
-    return pyodbc.connect(CONN_STR, autocommit=True)
+    """Retorna uma conexão ativa com o banco de dados (SQLite ou Access)."""
+    if IS_SQLITE:
+        conn = sqlite3.connect(SQLITE_DB_PATH)
+        conn.row_factory = sqlite3.Row
+        return conn
+    else:
+        conn_str = f"DRIVER={{Microsoft Access Driver (*.mdb, *.accdb)}};DBQ={ACCDB_PATH};"
+        return pyodbc.connect(conn_str, autocommit=True)
 
 def init_db():
-    """Verifica e inicializa o banco de dados e as tabelas se necessário."""
-    try:
-        if not os.path.exists(DB_PATH):
-            import win32com.client
-            cat = win32com.client.Dispatch("ADOX.Catalog")
-            cat.Create(f"Provider=Microsoft.ACE.OLEDB.12.0;Data Source={DB_PATH};")
-            cat = None
+    """Inicializa tabelas e dados padrões caso não existam."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
 
-        conn = pyodbc.connect(CONN_STR, autocommit=True)
-        cursor = conn.cursor()
+    if IS_SQLITE:
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS tbl_UnidadesOperacionais (
+                id_unidade INTEGER PRIMARY KEY AUTOINCREMENT,
+                nome_unidade TEXT NOT NULL,
+                endereco TEXT,
+                cnpj TEXT
+            )
+        """)
 
-        # 1. Criar tabela de Unidades Operacionais
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS tbl_Usuarios (
+                id_usuario INTEGER PRIMARY KEY AUTOINCREMENT,
+                usuario TEXT NOT NULL UNIQUE,
+                senha TEXT NOT NULL,
+                nome_usuario TEXT NOT NULL,
+                nivel_acesso TEXT DEFAULT 'Operador',
+                id_unidade INTEGER,
+                status_aprovacao TEXT DEFAULT 'Pendente'
+            )
+        """)
+
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS tbl_Categorias (
+                id_categoria INTEGER PRIMARY KEY AUTOINCREMENT,
+                nome_categoria TEXT NOT NULL
+            )
+        """)
+
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS tbl_Fornecedores (
+                id_fornecedor INTEGER PRIMARY KEY AUTOINCREMENT,
+                nome_fornecedor TEXT NOT NULL,
+                cnpj_cpf TEXT,
+                telefone TEXT,
+                email TEXT
+            )
+        """)
+
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS tbl_Produtos (
+                id_produto INTEGER PRIMARY KEY AUTOINCREMENT,
+                codigo_barras TEXT,
+                nome_produto TEXT NOT NULL,
+                id_categoria INTEGER,
+                id_fornecedor INTEGER,
+                id_unidade INTEGER,
+                estoque_minimo INTEGER DEFAULT 5,
+                preco_custo REAL DEFAULT 0,
+                preco_venda REAL DEFAULT 0,
+                data_cadastro TEXT
+            )
+        """)
+
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS tbl_Movimentacoes (
+                id_movimentacao INTEGER PRIMARY KEY AUTOINCREMENT,
+                id_produto INTEGER NOT NULL,
+                tipo_movimentacao TEXT NOT NULL,
+                quantidade INTEGER NOT NULL,
+                valor_unitario REAL DEFAULT 0,
+                data_movimentacao TEXT,
+                observacao TEXT,
+                id_unidade INTEGER
+            )
+        """)
+
+        # Dados Padrões para SQLite se vazios
+        cursor.execute("SELECT COUNT(*) FROM tbl_UnidadesOperacionais")
+        if cursor.fetchone()[0] == 0:
+            cursor.execute("""
+                INSERT INTO tbl_UnidadesOperacionais (nome_unidade, endereco, cnpj)
+                VALUES ('Unidade Matriz', 'Av. Principal, 1000 - Centro', '00.000.000/0001-00')
+            """)
+
+        cursor.execute("SELECT COUNT(*) FROM tbl_Usuarios")
+        if cursor.fetchone()[0] == 0:
+            cursor.execute("""
+                INSERT INTO tbl_Usuarios (usuario, senha, nome_usuario, nivel_acesso, id_unidade, status_aprovacao)
+                VALUES ('admin', 'admin123', 'Administrador do Sistema', 'Administrador', 1, 'Aprovado')
+            """)
+
+        cursor.execute("SELECT COUNT(*) FROM tbl_Categorias")
+        if cursor.fetchone()[0] == 0:
+            cursor.execute("INSERT INTO tbl_Categorias (nome_categoria) VALUES ('Eletrônicos')")
+            cursor.execute("INSERT INTO tbl_Categorias (nome_categoria) VALUES ('Escritório')")
+            cursor.execute("INSERT INTO tbl_Categorias (nome_categoria) VALUES ('Informática')")
+
+        cursor.execute("SELECT COUNT(*) FROM tbl_Fornecedores")
+        if cursor.fetchone()[0] == 0:
+            cursor.execute("""
+                INSERT INTO tbl_Fornecedores (nome_fornecedor, cnpj_cpf, telefone, email)
+                VALUES ('Tech Brasil LTDA', '12.345.678/0001-90', '(11) 98888-7777', 'contato@techbrasil.com')
+            """)
+
+        conn.commit()
+        conn.close()
+
+    else:
+        # Access DB Init
         try:
             cursor.execute("SELECT 1 FROM tbl_UnidadesOperacionais")
         except:
@@ -48,7 +156,6 @@ def init_db():
                 VALUES ('Unidade Matriz', 'Av. Principal, 1000 - Centro', '00.000.000/0001-00')
             """)
 
-        # 2. Criar tabela de usuários
         try:
             cursor.execute("SELECT 1 FROM tbl_Usuarios")
         except:
@@ -68,106 +175,7 @@ def init_db():
                 VALUES ('admin', 'admin123', 'Administrador do Sistema', 'Administrador', 1, 'Aprovado')
             """)
 
-        # Migração de colunas para tbl_Usuarios se a tabela já existia sem elas
-        try:
-            cursor.execute("ALTER TABLE tbl_Usuarios ADD COLUMN id_unidade INTEGER")
-        except:
-            pass
-
-        try:
-            cursor.execute("ALTER TABLE tbl_Usuarios ADD COLUMN status_aprovacao VARCHAR(20)")
-        except:
-            pass
-
-        # Garantir que admin esteja Aprovado e na Unidade 1
-        try:
-            cursor.execute("UPDATE tbl_Usuarios SET status_aprovacao = 'Aprovado', id_unidade = 1 WHERE usuario = 'admin'")
-            cursor.execute("UPDATE tbl_Usuarios SET status_aprovacao = 'Aprovado' WHERE status_aprovacao IS NULL")
-            cursor.execute("UPDATE tbl_Usuarios SET id_unidade = 1 WHERE id_unidade IS NULL")
-        except Exception as e:
-            print(f"Aviso atualização colunas usuarios: {e}")
-
-        # 3. Criar tabela de categorias
-        try:
-            cursor.execute("SELECT 1 FROM tbl_Categorias")
-        except:
-            cursor.execute("""
-                CREATE TABLE tbl_Categorias (
-                    id_categoria AUTOINCREMENT PRIMARY KEY,
-                    nome_categoria VARCHAR(100) NOT NULL
-                )
-            """)
-            cursor.execute("INSERT INTO tbl_Categorias (nome_categoria) VALUES ('Eletrônicos')")
-            cursor.execute("INSERT INTO tbl_Categorias (nome_categoria) VALUES ('Escritório')")
-            cursor.execute("INSERT INTO tbl_Categorias (nome_categoria) VALUES ('Informática')")
-
-        # 4. Criar tabela de fornecedores
-        try:
-            cursor.execute("SELECT 1 FROM tbl_Fornecedores")
-        except:
-            cursor.execute("""
-                CREATE TABLE tbl_Fornecedores (
-                    id_fornecedor AUTOINCREMENT PRIMARY KEY,
-                    nome_fornecedor VARCHAR(150) NOT NULL,
-                    cnpj_cpf VARCHAR(20),
-                    telefone VARCHAR(20),
-                    email VARCHAR(100)
-                )
-            """)
-            cursor.execute("""
-                INSERT INTO tbl_Fornecedores (nome_fornecedor, cnpj_cpf, telefone, email)
-                VALUES ('Tech Brasil LTDA', '12.345.678/0001-90', '(11) 98888-7777', 'contato@techbrasil.com')
-            """)
-
-        # 5. Criar tabela de produtos
-        try:
-            cursor.execute("SELECT 1 FROM tbl_Produtos")
-        except:
-            cursor.execute("""
-                CREATE TABLE tbl_Produtos (
-                    id_produto AUTOINCREMENT PRIMARY KEY,
-                    codigo_barras VARCHAR(50),
-                    nome_produto VARCHAR(150) NOT NULL,
-                    id_categoria INTEGER,
-                    id_fornecedor INTEGER,
-                    id_unidade INTEGER,
-                    estoque_minimo INTEGER DEFAULT 5,
-                    preco_custo CURRENCY DEFAULT 0,
-                    preco_venda CURRENCY DEFAULT 0,
-                    data_cadastro DATETIME
-                )
-            """)
-
-        try:
-            cursor.execute("ALTER TABLE tbl_Produtos ADD COLUMN id_unidade INTEGER")
-        except:
-            pass
-
-        # 6. Criar tabela de movimentações
-        try:
-            cursor.execute("SELECT 1 FROM tbl_Movimentacoes")
-        except:
-            cursor.execute("""
-                CREATE TABLE tbl_Movimentacoes (
-                    id_movimentacao AUTOINCREMENT PRIMARY KEY,
-                    id_produto INTEGER NOT NULL,
-                    tipo_movimentacao VARCHAR(10) NOT NULL,
-                    quantidade INTEGER NOT NULL,
-                    valor_unitario CURRENCY DEFAULT 0,
-                    data_movimentacao DATETIME,
-                    observacao MEMO,
-                    id_unidade INTEGER
-                )
-            """)
-
-        try:
-            cursor.execute("ALTER TABLE tbl_Movimentacoes ADD COLUMN id_unidade INTEGER")
-        except:
-            pass
-
         conn.close()
-    except Exception as e:
-        print(f"Erro na inicialização do banco MS Access: {e}")
 
 # --- UNIDADES OPERACIONAIS ---
 
@@ -194,6 +202,7 @@ def cadastrar_unidade(nome_unidade, endereco="", cnpj=""):
         INSERT INTO tbl_UnidadesOperacionais (nome_unidade, endereco, cnpj)
         VALUES (?, ?, ?)
     """, (nome_unidade, endereco, cnpj))
+    if IS_SQLITE: conn.commit()
     conn.close()
     return True
 
@@ -205,6 +214,7 @@ def atualizar_unidade(id_unidade, nome_unidade, endereco="", cnpj=""):
         SET nome_unidade = ?, endereco = ?, cnpj = ?
         WHERE id_unidade = ?
     """, (nome_unidade, endereco, cnpj, id_unidade))
+    if IS_SQLITE: conn.commit()
     conn.close()
     return True
 
@@ -257,7 +267,6 @@ def cadastrar_usuario(usuario, senha, nome_usuario, nivel_acesso="Operador", id_
     conn = get_db_connection()
     cursor = conn.cursor()
     
-    # Verificar se usuário já existe
     cursor.execute("SELECT id_usuario FROM tbl_Usuarios WHERE usuario = ?", (usuario,))
     if cursor.fetchone():
         conn.close()
@@ -267,6 +276,7 @@ def cadastrar_usuario(usuario, senha, nome_usuario, nivel_acesso="Operador", id_
         INSERT INTO tbl_Usuarios (usuario, senha, nome_usuario, nivel_acesso, id_unidade, status_aprovacao)
         VALUES (?, ?, ?, ?, ?, ?)
     """, (usuario, senha, nome_usuario, nivel_acesso, id_unidade, status_aprovacao))
+    if IS_SQLITE: conn.commit()
     conn.close()
     return True
 
@@ -302,6 +312,7 @@ def aprovar_usuario(id_usuario, id_unidade, nivel_acesso="Operador"):
         SET status_aprovacao = 'Aprovado', id_unidade = ?, nivel_acesso = ?
         WHERE id_usuario = ?
     """, (id_unidade, nivel_acesso, id_usuario))
+    if IS_SQLITE: conn.commit()
     conn.close()
     return True
 
@@ -313,6 +324,7 @@ def atualizar_usuario(id_usuario, id_unidade, nivel_acesso="Operador"):
         SET id_unidade = ?, nivel_acesso = ?
         WHERE id_usuario = ?
     """, (id_unidade, nivel_acesso, id_usuario))
+    if IS_SQLITE: conn.commit()
     conn.close()
     return True
 
@@ -324,6 +336,7 @@ def rejeitar_usuario(id_usuario):
         SET status_aprovacao = 'Rejeitado'
         WHERE id_usuario = ?
     """, (id_usuario,))
+    if IS_SQLITE: conn.commit()
     conn.close()
     return True
 
@@ -335,12 +348,16 @@ def listar_categorias():
     cursor.execute("SELECT id_categoria, nome_categoria FROM tbl_Categorias ORDER BY nome_categoria ASC")
     rows = cursor.fetchall()
     conn.close()
-    return [{"id_categoria": r[0], "nome_categoria": r[1]} for r in rows]
+    return [
+        {"id_categoria": r[0], "nome_categoria": r[1]}
+        for r in rows
+    ]
 
 def cadastrar_categoria(nome_categoria):
     conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute("INSERT INTO tbl_Categorias (nome_categoria) VALUES (?)", (nome_categoria,))
+    if IS_SQLITE: conn.commit()
     conn.close()
     return True
 
@@ -362,13 +379,14 @@ def cadastrar_fornecedor(nome, cnpj_cpf="", telefone="", email=""):
         INSERT INTO tbl_Fornecedores (nome_fornecedor, cnpj_cpf, telefone, email)
         VALUES (?, ?, ?, ?)
     """, (nome, cnpj_cpf, telefone, email))
+    if IS_SQLITE: conn.commit()
     conn.close()
     return True
 
 # --- PRODUTOS & SALDO DE ESTOQUE ---
 
 def calcular_estoque_produto(id_produto, id_unidade=None, cursor=None):
-    """Calcula o saldo atual de estoque de um produto para uma unidade específica ou geral (Soma Entradas - Soma Saídas)."""
+    """Calcula o saldo atual de estoque de um produto para uma unidade específica ou geral."""
     close_conn = False
     if cursor is None:
         conn = get_db_connection()
@@ -378,16 +396,16 @@ def calcular_estoque_produto(id_produto, id_unidade=None, cursor=None):
     if id_unidade:
         cursor.execute("""
             SELECT 
-                SUM(IIF(tipo_movimentacao = 'ENTRADA', quantidade, 0)) AS total_entradas,
-                SUM(IIF(tipo_movimentacao = 'SAIDA', quantidade, 0)) AS total_saidas
+                SUM(CASE WHEN tipo_movimentacao = 'ENTRADA' THEN quantidade ELSE 0 END) AS total_entradas,
+                SUM(CASE WHEN tipo_movimentacao = 'SAIDA' THEN quantidade ELSE 0 END) AS total_saidas
             FROM tbl_Movimentacoes
             WHERE id_produto = ? AND id_unidade = ?
         """, (id_produto, id_unidade))
     else:
         cursor.execute("""
             SELECT 
-                SUM(IIF(tipo_movimentacao = 'ENTRADA', quantidade, 0)) AS total_entradas,
-                SUM(IIF(tipo_movimentacao = 'SAIDA', quantidade, 0)) AS total_saidas
+                SUM(CASE WHEN tipo_movimentacao = 'ENTRADA' THEN quantidade ELSE 0 END) AS total_entradas,
+                SUM(CASE WHEN tipo_movimentacao = 'SAIDA' THEN quantidade ELSE 0 END) AS total_saidas
             FROM tbl_Movimentacoes
             WHERE id_produto = ?
         """, (id_produto,))
@@ -500,7 +518,7 @@ def obter_produto_por_id(id_produto, id_unidade=None):
 def salvar_produto(data):
     conn = get_db_connection()
     cursor = conn.cursor()
-    now = datetime.now()
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     id_produto = data.get("id_produto")
     codigo_barras = data.get("codigo_barras", "")
@@ -525,6 +543,7 @@ def salvar_produto(data):
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (codigo_barras, nome_produto, id_categoria, id_fornecedor, estoque_minimo, preco_custo, preco_venda, now, id_unidade))
     
+    if IS_SQLITE: conn.commit()
     conn.close()
     return True
 
@@ -533,10 +552,11 @@ def excluir_produto(id_produto):
     cursor = conn.cursor()
     cursor.execute("DELETE FROM tbl_Movimentacoes WHERE id_produto = ?", (id_produto,))
     cursor.execute("DELETE FROM tbl_Produtos WHERE id_produto = ?", (id_produto,))
+    if IS_SQLITE: conn.commit()
     conn.close()
     return True
 
-# --- MOVIMENTAÇÕES DE ESTOQUE (ENTRADA E SAÍDA) ---
+# --- MOVIMENTAÇÕES DE ESTOQUE ---
 
 def registrar_movimentacao(id_produto, tipo_movimentacao, quantidade, valor_unitario, observacao="", data_movimentacao=None, id_unidade=None):
     quantidade = int(quantidade)
@@ -559,22 +579,14 @@ def registrar_movimentacao(id_produto, tipo_movimentacao, quantidade, valor_unit
             msg_unid = " nesta unidade" if id_unidade else ""
             raise Exception(f"Estoque insuficiente{msg_unid}! Saldo disponível: {estoque_atual} unidade(s). Tentativa de saída: {quantidade}.")
 
-    if data_movimentacao:
-        try:
-            if "T" in str(data_movimentacao):
-                dt_obj = datetime.strptime(str(data_movimentacao), "%Y-%m-%dT%H:%M")
-            else:
-                dt_obj = datetime.strptime(str(data_movimentacao), "%Y-%m-%d %H:%M:%S")
-        except:
-            dt_obj = datetime.now()
-    else:
-        dt_obj = datetime.now()
+    dt_str = str(data_movimentacao) if data_movimentacao else datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     cursor.execute("""
         INSERT INTO tbl_Movimentacoes (id_produto, tipo_movimentacao, quantidade, valor_unitario, data_movimentacao, observacao, id_unidade)
         VALUES (?, ?, ?, ?, ?, ?, ?)
-    """, (id_produto, tipo_movimentacao, quantidade, valor_unitario, dt_obj, observacao, id_unidade))
+    """, (id_produto, tipo_movimentacao, quantidade, valor_unitario, dt_str, observacao, id_unidade))
 
+    if IS_SQLITE: conn.commit()
     conn.close()
     return True
 
@@ -588,15 +600,28 @@ def listar_movimentacoes(limit=100, id_unidade=None):
         where_clause = " WHERE m.id_unidade = ?"
         params = [id_unidade]
 
-    query = f"""
-        SELECT TOP {limit} m.id_movimentacao, m.id_produto, p.nome_produto, m.tipo_movimentacao,
-               m.quantidade, m.valor_unitario, m.data_movimentacao, m.observacao, m.id_unidade, u.nome_unidade
-        FROM (tbl_Movimentacoes m
-        INNER JOIN tbl_Produtos p ON m.id_produto = p.id_produto)
-        LEFT JOIN tbl_UnidadesOperacionais u ON m.id_unidade = u.id_unidade
-        {where_clause}
-        ORDER BY m.data_movimentacao DESC, m.id_movimentacao DESC
-    """
+    if IS_SQLITE:
+        query = f"""
+            SELECT m.id_movimentacao, m.id_produto, p.nome_produto, m.tipo_movimentacao,
+                   m.quantidade, m.valor_unitario, m.data_movimentacao, m.observacao, m.id_unidade, u.nome_unidade
+            FROM (tbl_Movimentacoes m
+            INNER JOIN tbl_Produtos p ON m.id_produto = p.id_produto)
+            LEFT JOIN tbl_UnidadesOperacionais u ON m.id_unidade = u.id_unidade
+            {where_clause}
+            ORDER BY m.data_movimentacao DESC, m.id_movimentacao DESC
+            LIMIT {limit}
+        """
+    else:
+        query = f"""
+            SELECT TOP {limit} m.id_movimentacao, m.id_produto, p.nome_produto, m.tipo_movimentacao,
+                   m.quantidade, m.valor_unitario, m.data_movimentacao, m.observacao, m.id_unidade, u.nome_unidade
+            FROM (tbl_Movimentacoes m
+            INNER JOIN tbl_Produtos p ON m.id_produto = p.id_produto)
+            LEFT JOIN tbl_UnidadesOperacionais u ON m.id_unidade = u.id_unidade
+            {where_clause}
+            ORDER BY m.data_movimentacao DESC, m.id_movimentacao DESC
+        """
+
     cursor.execute(query, params)
     rows = cursor.fetchall()
     conn.close()
