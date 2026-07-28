@@ -4,3 +4,8 @@ services:
     env: python
     buildCommand: pip install -r requirements.txt
     startCommand: gunicorn app:app
+    envVars:
+      - key: DATABASE_URL
+        sync: false        # Você define o valor real no painel do Render
+      - key: SECRET_KEY
+        generateValue: true  # O Render gera automaticamente uma chave segura

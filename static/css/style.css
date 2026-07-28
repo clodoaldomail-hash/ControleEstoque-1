@@ -1,5 +1,5 @@
 /* ==========================================================================
-   ESTILO GLOBAL E DESIGN SYSTEM - CONTROLE DE ESTOQUE MS ACCESS
+   ESTILO GLOBAL E DESIGN SYSTEM - CONTROLE DE ESTOQUE
    ========================================================================== */
 
 :root {
@@ -328,13 +328,24 @@ a:hover {
 }
 
 .badge-db {
-    font-size: 12px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 32px;
+    height: 32px;
+    font-size: 14px;
     background: rgba(16, 185, 129, 0.15);
     color: var(--accent-green);
     border: 1px solid rgba(16, 185, 129, 0.3);
-    padding: 4px 10px;
     border-radius: var(--radius-full);
-    font-weight: 500;
+    flex-shrink: 0;
+    transition: background 0.3s, color 0.3s, border-color 0.3s;
+}
+
+.badge-db.disconnected {
+    background: rgba(239, 68, 68, 0.15);
+    color: #ef4444;
+    border-color: rgba(239, 68, 68, 0.3);
 }
 
 .topbar-actions {
@@ -555,6 +566,23 @@ select option {
     align-items: center;
     justify-content: space-between;
     margin-bottom: 20px;
+    gap: 12px;
+}
+
+.panel-header-triple {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 20px;
+}
+
+.panel-header-triple .search-box {
+    flex: 1;
+    width: auto;
+}
+
+.panel-header-triple .filter-group {
+    flex-shrink: 0;
 }
 
 /* ==========================================================================
@@ -777,4 +805,49 @@ select option {
     .dash-grid { grid-template-columns: 1fr; }
     .form-grid { grid-template-columns: 1fr; }
     .span-2 { grid-column: span 1; }
+}
+
+/* Media Print para Relatórios */
+@media print {
+    .sidebar, .topbar, .action-buttons, .filter-panel, .btn, .btn-logout, .toast-container {
+        display: none !important;
+    }
+    body {
+        background: #ffffff !important;
+        color: #000000 !important;
+        font-size: 12pt;
+    }
+    .content-wrapper {
+        margin-left: 0 !important;
+        padding: 0 !important;
+    }
+    .panel {
+        background: transparent !important;
+        border: none !important;
+        box-shadow: none !important;
+        padding: 0 !important;
+    }
+    #report-summary-grid > div {
+        border: 1px solid #ccc !important;
+        background: #f8fafc !important;
+        color: #000 !important;
+    }
+    #report-summary-grid h4, #report-summary-grid small {
+        color: #000 !important;
+    }
+    .table {
+        color: #000 !important;
+        border-collapse: collapse !important;
+        width: 100% !important;
+    }
+    .table th, .table td {
+        border: 1px solid #cbd5e1 !important;
+        padding: 8px !important;
+        color: #000 !important;
+    }
+    .badge {
+        border: 1px solid #000 !important;
+        color: #000 !important;
+        background: transparent !important;
+    }
 }

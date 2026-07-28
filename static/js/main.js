@@ -9,6 +9,14 @@ let produtosCache = [];
 let categoriasCache = [];
 let unidadesCache = [];
 
+// --- HELPERS DE NÍVEL DE ACESSO ---
+function isAdmin() {
+    return currentUser && currentUser.nivel_acesso === 'Administrador';
+}
+function isSupervisor() {
+    return currentUser && (currentUser.nivel_acesso === 'Supervisor' || currentUser.nivel_acesso === 'Administrador');
+}
+
 // --- MOTOR LOCALDB PARA GITHUB PAGES (CLIENT-SIDE ESTÁTICO) ---
 const LocalDB = {
     init() {
@@ -36,12 +44,12 @@ const LocalDB = {
         }
         if (!localStorage.getItem('gh_produtos')) {
             localStorage.setItem('gh_produtos', JSON.stringify([
-                { id_produto: 1, codigo_barras: "7891234567890", nome_produto: "Mouse Sem Fio USB", id_categoria: 3, nome_categoria: "Informática", id_fornecedor: 1, nome_fornecedor: "Tech Brasil LTDA", estoque_minimo: 5, preco_custo: 25.00, preco_venda: 49.90, data_cadastro: "2026-07-25 10:00:00", id_unidade: 1, nome_unidade: "Unidade Matriz" }
+                { id_produto: 1, codigo_barras: "7891234567890", nome_produto: "Mouse Sem Fio USB", id_categoria: 3, nome_categoria: "Informática", estoque_minimo: 5, preco_venda: 49.90, data_cadastro: "2026-07-25 10:00:00", id_unidade: 1, nome_unidade: "Unidade Matriz" }
             ]));
         }
         if (!localStorage.getItem('gh_movimentacoes')) {
             localStorage.setItem('gh_movimentacoes', JSON.stringify([
-                { id_movimentacao: 1, id_produto: 1, nome_produto: "Mouse Sem Fio USB", tipo_movimentacao: "ENTRADA", quantidade: 20, valor_unitario: 25.00, data_movimentacao: "2026-07-25 10:30:00", observacao: "Estoque inicial", id_unidade: 1, nome_unidade: "Unidade Matriz" }
+                { id_movimentacao: 1, id_produto: 1, nome_produto: "Mouse Sem Fio USB", tipo_movimentacao: "ENTRADA", quantidade: 20, valor_unitario: 25.00, data_movimentacao: "2026-07-25 10:30:00", observacao: "Estoque inicial", id_unidade: 1, nome_unidade: "Unidade Matriz", id_fornecedor: 1, nome_fornecedor: "Tech Brasil LTDA" }
             ]));
         }
     },
@@ -209,14 +217,23 @@ const LocalDB = {
             let prods = this.get('produtos');
             if (busca) prods = prods.filter(p => p.nome_produto.toLowerCase().includes(busca) || (p.codigo_barras && p.codigo_barras.includes(busca)));
             if (catId) prods = prods.filter(p => p.id_categoria == catId);
+            if (unidId) prods = prods.filter(p => !p.id_unidade || p.id_unidade == unidId);
 
             const resultProds = prods.map(p => {
                 const estAtual = this.calcularEstoqueProduto(p.id_produto, unidId);
                 const estMin = p.estoque_minimo || 0;
+                let precoCusto = parseFloat(p.preco_custo || 0);
+                if (precoCusto === 0) {
+                    const movs = this.get('movimentacoes').filter(m => m.id_produto == p.id_produto && m.tipo_movimentacao === 'ENTRADA' && parseFloat(m.valor_unitario) > 0);
+                    if (movs.length > 0) {
+                        movs.sort((a, b) => new Date(b.data_movimentacao) - new Date(a.data_movimentacao));
+                        precoCusto = parseFloat(movs[0].valor_unitario);
+                    }
+                }
                 let status = "Normal";
                 if (estAtual <= 0) status = "Zerado";
                 else if (estAtual <= estMin) status = "Baixo";
-                return { ...p, estoque_atual: estAtual, status_estoque: status };
+                return { ...p, preco_custo: precoCusto, estoque_atual: estAtual, status_estoque: status };
             });
 
             return { success: true, produtos: resultProds };
@@ -236,11 +253,9 @@ const LocalDB = {
         if (path === '/api/produtos' && method === 'POST') {
             const prods = this.get('produtos');
             const cats = this.get('categorias');
-            const forns = this.get('fornecedores');
             const units = this.get('unidades');
 
             const cat = cats.find(c => c.id_categoria == body.id_categoria);
-            const forn = forns.find(f => f.id_fornecedor == body.id_fornecedor);
             const unit = units.find(u => u.id_unidade == body.id_unidade);
 
             if (body.id_produto) {
@@ -248,7 +263,6 @@ const LocalDB = {
                 if (p) {
                     Object.assign(p, body);
                     p.nome_categoria = cat ? cat.nome_categoria : 'Sem Categoria';
-                    p.nome_fornecedor = forn ? forn.nome_fornecedor : 'Sem Fornecedor';
                     p.nome_unidade = unit ? unit.nome_unidade : 'Todas';
                 }
             } else {
@@ -257,7 +271,6 @@ const LocalDB = {
                     ...body,
                     data_cadastro: new Date().toISOString().replace('T', ' ').substring(0, 19),
                     nome_categoria: cat ? cat.nome_categoria : 'Sem Categoria',
-                    nome_fornecedor: forn ? forn.nome_fornecedor : 'Sem Fornecedor',
                     nome_unidade: unit ? unit.nome_unidade : 'Todas'
                 });
             }
@@ -278,8 +291,18 @@ const LocalDB = {
         // MOVIMENTACOES GET
         if (path === '/api/movimentacoes' && method === 'GET') {
             const unidId = params.get('id_unidade');
+            const prodId = params.get('id_produto');
+            const dataInicio = params.get('data_inicio');
+            const dataFim = params.get('data_fim');
+            const tipo = params.get('tipo_movimentacao');
+
             let movs = this.get('movimentacoes');
             if (unidId) movs = movs.filter(m => m.id_unidade == unidId);
+            if (prodId) movs = movs.filter(m => m.id_produto == prodId);
+            if (tipo) movs = movs.filter(m => m.tipo_movimentacao === tipo);
+            if (dataInicio) movs = movs.filter(m => (m.data_movimentacao || '').substring(0, 10) >= dataInicio);
+            if (dataFim) movs = movs.filter(m => (m.data_movimentacao || '').substring(0, 10) <= dataFim);
+
             movs.sort((a, b) => new Date(b.data_movimentacao) - new Date(a.data_movimentacao));
             return { success: true, movimentacoes: movs };
         }
@@ -289,6 +312,7 @@ const LocalDB = {
             const movs = this.get('movimentacoes');
             const prods = this.get('produtos');
             const units = this.get('unidades');
+            const forns = this.get('fornecedores');
 
             const prod = prods.find(p => p.id_produto == body.id_produto);
             if (!prod) return { success: false, message: 'Produto não encontrado.' };
@@ -301,6 +325,8 @@ const LocalDB = {
             }
 
             const unit = units.find(u => u.id_unidade == body.id_unidade);
+            const forn = forns.find(f => f.id_fornecedor == body.id_fornecedor);
+
             movs.push({
                 id_movimentacao: Date.now(),
                 id_produto: parseInt(body.id_produto),
@@ -311,7 +337,9 @@ const LocalDB = {
                 data_movimentacao: body.data_movimentacao || new Date().toISOString(),
                 observacao: body.observacao || '',
                 id_unidade: parseInt(body.id_unidade),
-                nome_unidade: unit ? unit.nome_unidade : 'Sem Unidade'
+                nome_unidade: unit ? unit.nome_unidade : 'Sem Unidade',
+                id_fornecedor: body.id_fornecedor ? parseInt(body.id_fornecedor) : null,
+                nome_fornecedor: forn ? forn.nome_fornecedor : 'Sem Fornecedor'
             });
 
             this.set('movimentacoes', movs);
@@ -499,10 +527,15 @@ async function iniciarAplicacao() {
 
     const adminElements = document.querySelectorAll('.admin-only');
     adminElements.forEach(el => {
-        el.style.display = (currentUser.nivel_acesso === 'Administrador') ? '' : 'none';
+        el.style.display = isAdmin() ? '' : 'none';
     });
 
-    if (currentUser.nivel_acesso !== 'Administrador') {
+    const supervisorElements = document.querySelectorAll('.supervisor-only');
+    supervisorElements.forEach(el => {
+        el.style.display = isSupervisor() ? '' : 'none';
+    });
+
+    if (!isSupervisor()) {
         navegarParaView('view-dashboard');
     }
 
@@ -536,8 +569,12 @@ function configurarNavegacao() {
             e.preventDefault();
             const targetViewId = item.getAttribute('data-target');
             if (targetViewId) {
-                if (item.classList.contains('admin-only') && currentUser.nivel_acesso !== 'Administrador') {
+                if (item.classList.contains('admin-only') && !isAdmin()) {
                     showToast('Apenas administradores podem acessar esta seção.', 'warning');
+                    return;
+                }
+                if (item.classList.contains('supervisor-only') && !isSupervisor()) {
+                    showToast('Acesso restrito a supervisores e administradores.', 'warning');
                     return;
                 }
                 navItems.forEach(i => i.classList.remove('active'));
@@ -567,7 +604,10 @@ function navegarParaView(viewId) {
 
         if (viewId === 'view-dashboard') carregarDashboard();
         if (viewId === 'view-produtos') carregarProdutos();
-        if (viewId === 'view-movimentacoes') carregarMovimentacoes();
+        if (viewId === 'view-movimentacoes') {
+            preencherOpcoesFiltrosMovimentacoes();
+            carregarMovimentacoes();
+        }
         if (viewId === 'view-cadastros') carregarCadastrosGerais();
         if (viewId === 'view-usuarios') carregarUsuarios();
     }
@@ -704,7 +744,9 @@ async function salvarUnidade(event) {
 // --- GESTÃO DE PRODUTOS ---
 
 async function carregarProdutos() {
-    const busca = document.getElementById('filter-produto-busca').value;
+    const busca = (document.getElementById('filter-produto-busca')?.value || '');
+    const nomeEl = document.getElementById('filter-produto-nome');
+    const nomeFiltro = nomeEl ? nomeEl.value.trim().toLowerCase() : '';
     const catId = document.getElementById('filter-produto-categoria').value;
 
     let url = `/api/produtos?busca=${encodeURIComponent(busca)}&categoria_id=${encodeURIComponent(catId)}`;
@@ -715,7 +757,11 @@ async function carregarProdutos() {
     const result = await safeFetch(url);
 
     if (result.success) {
-        produtosCache = result.produtos;
+        let lista = result.produtos;
+        if (nomeFiltro) {
+            lista = lista.filter(p => p.nome_produto.toLowerCase().includes(nomeFiltro));
+        }
+        produtosCache = lista;
         renderizarTabelaProdutos(produtosCache);
     }
 }
@@ -723,7 +769,7 @@ async function carregarProdutos() {
 function renderizarTabelaProdutos(produtos) {
     const tbody = document.getElementById('table-produtos-body');
     if (produtos.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="11" class="text-center text-muted">Nenhum produto cadastrado.</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="10" class="text-center text-muted">Nenhum produto cadastrado.</td></tr>';
         return;
     }
 
@@ -737,7 +783,6 @@ function renderizarTabelaProdutos(produtos) {
                 <td><code>${p.codigo_barras || '-'}</code></td>
                 <td><strong>${p.nome_produto}</strong></td>
                 <td>${p.nome_categoria}</td>
-                <td>${p.nome_fornecedor}</td>
                 <td>${p.nome_unidade || 'Todas'}</td>
                 <td>${p.estoque_minimo}</td>
                 <td>${formatarMoeda(p.preco_custo)}</td>
@@ -745,7 +790,7 @@ function renderizarTabelaProdutos(produtos) {
                 <td><strong style="font-size: 15px;">${p.estoque_atual}</strong></td>
                 <td><span class="badge ${badgeClass}">${p.status_estoque}</span></td>
                 <td class="text-right">
-                    ${currentUser.nivel_acesso === 'Administrador' ? `
+                    ${isSupervisor() ? `
                     <button class="btn btn-sm btn-outline" onclick="abrirModalProduto(${p.id_produto})" title="Editar">
                         <i class="fa-solid fa-pen"></i>
                     </button>
@@ -782,10 +827,8 @@ async function abrirModalProduto(id_produto = null) {
             document.getElementById('prod-codigo').value = p.codigo_barras;
             document.getElementById('prod-nome').value = p.nome_produto;
             document.getElementById('prod-categoria').value = p.id_categoria || '';
-            document.getElementById('prod-fornecedor').value = p.id_fornecedor || '';
             document.getElementById('prod-unidade').value = p.id_unidade || '';
             document.getElementById('prod-minimo').value = p.estoque_minimo;
-            document.getElementById('prod-custo').value = p.preco_custo;
             document.getElementById('prod-venda').value = p.preco_venda;
         }
     }
@@ -800,10 +843,8 @@ async function salvarProduto(event) {
         codigo_barras: document.getElementById('prod-codigo').value.trim(),
         nome_produto: document.getElementById('prod-nome').value.trim(),
         id_categoria: document.getElementById('prod-categoria').value || null,
-        id_fornecedor: document.getElementById('prod-fornecedor').value || null,
         id_unidade: document.getElementById('prod-unidade').value || null,
         estoque_minimo: document.getElementById('prod-minimo').value,
-        preco_custo: document.getElementById('prod-custo').value,
         preco_venda: document.getElementById('prod-venda').value
     };
 
@@ -849,22 +890,84 @@ function getFormattedLocalDateTime() {
     return `${year}-${month}-${day}T${hours}:${minutes}`;
 }
 
-async function carregarMovimentacoes() {
-    let url = '/api/movimentacoes';
-    if (selectedUnitId) {
-        url += `?id_unidade=${selectedUnitId}`;
+async function preencherOpcoesFiltrosMovimentacoes() {
+    const dataU = await safeFetch('/api/unidades');
+    const selectU = document.getElementById('filter-mov-unidade');
+    if (dataU.success && selectU) {
+        const valAtual = selectU.value;
+        selectU.innerHTML = '<option value="">Todas as Unidades</option>' +
+            dataU.unidades.map(u => `<option value="${u.id_unidade}">${u.nome_unidade}</option>`).join('');
+        selectU.value = valAtual;
     }
+
+    const dataP = await safeFetch('/api/produtos');
+    const selectP = document.getElementById('filter-mov-produto');
+    if (dataP.success && selectP) {
+        const valAtual = selectP.value;
+        selectP.innerHTML = '<option value="">Todos os Produtos</option>' +
+            dataP.produtos.map(p => `<option value="${p.id_produto}">${p.nome_produto}</option>`).join('');
+        selectP.value = valAtual;
+    }
+}
+
+async function carregarMovimentacoes() {
+    const dtInicio = document.getElementById('filter-mov-inicio') ? document.getElementById('filter-mov-inicio').value : '';
+    const dtFim = document.getElementById('filter-mov-fim') ? document.getElementById('filter-mov-fim').value : '';
+    const filterUnid = document.getElementById('filter-mov-unidade') ? document.getElementById('filter-mov-unidade').value : '';
+    const filterProd = document.getElementById('filter-mov-produto') ? document.getElementById('filter-mov-produto').value : '';
+    const filterTipo = document.getElementById('filter-mov-tipo') ? document.getElementById('filter-mov-tipo').value : '';
+
+    let url = '/api/movimentacoes?1=1';
+    const activeUnit = filterUnid || selectedUnitId;
+    if (activeUnit) url += `&id_unidade=${encodeURIComponent(activeUnit)}`;
+    if (filterProd) url += `&id_produto=${encodeURIComponent(filterProd)}`;
+    if (dtInicio) url += `&data_inicio=${encodeURIComponent(dtInicio)}`;
+    if (dtFim) url += `&data_fim=${encodeURIComponent(dtFim)}`;
+    if (filterTipo) url += `&tipo_movimentacao=${encodeURIComponent(filterTipo)}`;
 
     const result = await safeFetch(url);
 
     if (result.success) {
+        const movs = result.movimentacoes;
+        
+        let entradasQtd = 0, entradasVal = 0;
+        let saidasQtd = 0, saidasVal = 0;
+
+        movs.forEach(m => {
+            const totalItem = (m.quantidade || 0) * (m.valor_unitario || 0);
+            if (m.tipo_movimentacao === 'ENTRADA') {
+                entradasQtd += parseInt(m.quantidade || 0);
+                entradasVal += totalItem;
+            } else if (m.tipo_movimentacao === 'SAIDA') {
+                saidasQtd += parseInt(m.quantidade || 0);
+                saidasVal += totalItem;
+            }
+        });
+
+        const saldoQtd = entradasQtd - saidasQtd;
+        const saldoVal = entradasVal - saidasVal;
+
+        const elEntQtd = document.getElementById('report-total-entradas-qtd');
+        const elEntVal = document.getElementById('report-total-entradas-val');
+        const elSaiQtd = document.getElementById('report-total-saidas-qtd');
+        const elSaiVal = document.getElementById('report-total-saidas-val');
+        const elSalQtd = document.getElementById('report-saldo-qtd');
+        const elSalVal = document.getElementById('report-saldo-val');
+
+        if (elEntQtd) elEntQtd.textContent = `${entradasQtd} pçs`;
+        if (elEntVal) elEntVal.textContent = formatarMoeda(entradasVal);
+        if (elSaiQtd) elSaiQtd.textContent = `${saidasQtd} pçs`;
+        if (elSaiVal) elSaiVal.textContent = formatarMoeda(saidasVal);
+        if (elSalQtd) elSalQtd.textContent = `${saldoQtd} pçs`;
+        if (elSalVal) elSalVal.textContent = formatarMoeda(saldoVal);
+
         const tbody = document.getElementById('table-movimentacoes-body');
-        if (result.movimentacoes.length === 0) {
-            tbody.innerHTML = '<tr><td colspan="9" class="text-center text-muted">Nenhuma movimentação registrada.</td></tr>';
+        if (movs.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="10" class="text-center text-muted">Nenhuma movimentação encontrada para os filtros selecionados.</td></tr>';
             return;
         }
 
-        tbody.innerHTML = result.movimentacoes.map(m => {
+        tbody.innerHTML = movs.map(m => {
             const total = m.quantidade * m.valor_unitario;
             return `
                 <tr>
@@ -872,6 +975,7 @@ async function carregarMovimentacoes() {
                     <td><small>${formatarData(m.data_movimentacao)}</small></td>
                     <td><span class="badge badge-info"><i class="fa-solid fa-building"></i> ${m.nome_unidade || 'Sem Unidade'}</span></td>
                     <td><strong>${m.nome_produto}</strong></td>
+                    <td>${m.nome_fornecedor || '-'}</td>
                     <td><span class="badge ${m.tipo_movimentacao === 'ENTRADA' ? 'badge-success' : 'badge-warning'}">${m.tipo_movimentacao}</span></td>
                     <td><strong>${m.quantidade}</strong></td>
                     <td>${formatarMoeda(m.valor_unitario)}</td>
@@ -881,6 +985,21 @@ async function carregarMovimentacoes() {
             `;
         }).join('');
     }
+}
+
+function aplicarFiltrosMovimentacoes(event) {
+    if (event) event.preventDefault();
+    carregarMovimentacoes();
+}
+
+function limparFiltrosMovimentacoes() {
+    const form = document.getElementById('form-filter-movimentacoes');
+    if (form) form.reset();
+    carregarMovimentacoes();
+}
+
+function imprimirRelatorioMovimentacoes() {
+    window.print();
 }
 
 async function abrirModalMovimentacao(tipo) {
@@ -898,6 +1017,19 @@ async function abrirModalMovimentacao(tipo) {
 
     document.getElementById('mov-saldo-info').classList.add('hidden');
 
+    const groupForn = document.getElementById('group-mov-fornecedor');
+    const valorLabel = document.getElementById('mov-valor-label');
+
+    if (tipo === 'ENTRADA') {
+        if (groupForn) groupForn.style.display = '';
+        if (valorLabel) valorLabel.textContent = 'Preço de Custo Unitário (R$)';
+    } else {
+        if (groupForn) groupForn.style.display = 'none';
+        if (valorLabel) valorLabel.textContent = 'Preço de Venda Unitário (R$)';
+    }
+
+    await carregarCategoriasEFornecedores();
+
     const selectU = document.getElementById('mov-unidade');
     const dataU = await safeFetch('/api/unidades');
     if (dataU.success) {
@@ -910,7 +1042,7 @@ async function abrirModalMovimentacao(tipo) {
             selectU.value = defaultUnit;
         }
 
-        if (currentUser.nivel_acesso !== 'Administrador') {
+        if (!isAdmin()) {
             selectU.value = currentUser.id_unidade;
             selectU.disabled = true;
         } else {
@@ -978,7 +1110,8 @@ async function salvarMovimentacao(event) {
         valor_unitario: document.getElementById('mov-valor').value,
         observacao: document.getElementById('mov-obs').value.trim(),
         data_movimentacao: document.getElementById('mov-data').value,
-        id_unidade: parseInt(movUnid)
+        id_unidade: parseInt(movUnid),
+        id_fornecedor: document.getElementById('mov-fornecedor') ? document.getElementById('mov-fornecedor').value || null : null
     };
 
     const result = await safeFetch('/api/movimentacoes', {
@@ -1015,11 +1148,11 @@ async function carregarCategoriasEFornecedores() {
     }
 
     if (dataForn.success) {
-        const selectForn = document.getElementById('prod-fornecedor');
-        if (selectForn) {
-            selectForn.innerHTML = '<option value="">Selecione...</option>' +
-                dataForn.fornecedores.map(f => `<option value="${f.id_fornecedor}">${f.nome_fornecedor}</option>`).join('');
-        }
+        const optionsForn = '<option value="">Selecione...</option>' +
+            dataForn.fornecedores.map(f => `<option value="${f.id_fornecedor}">${f.nome_fornecedor}</option>`).join('');
+
+        const selectFornMov = document.getElementById('mov-fornecedor');
+        if (selectFornMov) selectFornMov.innerHTML = optionsForn;
     }
 }
 
@@ -1144,7 +1277,7 @@ async function carregarUsuarios() {
                     <td>#${u.id_usuario}</td>
                     <td><strong>${u.nome_usuario}</strong></td>
                     <td><code>${u.usuario}</code></td>
-                    <td><span class="badge ${u.nivel_acesso === 'Administrador' ? 'badge-info' : 'badge-secondary'}">${u.nivel_acesso}</span></td>
+                    <td><span class="badge ${u.nivel_acesso === 'Administrador' ? 'badge-info' : u.nivel_acesso === 'Supervisor' ? 'badge-warning' : 'badge-secondary'}">${u.nivel_acesso}</span></td>
                     <td>${u.nome_unidade || 'Sem Unidade'}</td>
                     <td><span class="badge ${statusBadge}">${u.status_aprovacao || 'Aprovado'}</span></td>
                     <td class="text-right">${acoesHtml}</td>
@@ -1274,4 +1407,96 @@ function showToast(mensagem, tipo = 'success') {
         toast.style.transition = 'all 0.3s ease';
         setTimeout(() => toast.remove(), 300);
     }, 4000);
+}
+
+// --- RELATÓRIO DE ESTOQUE BAIXO ---
+
+async function abrirRelatorioEstoqueBaixo() {
+    document.getElementById('modal-relatorio-estoque').classList.remove('hidden');
+    document.getElementById('table-relatorio-body').innerHTML =
+        '<tr><td colspan="7" class="text-center text-muted">Carregando...</td></tr>';
+
+    let url = '/api/produtos?busca=';
+    if (selectedUnitId) url += `&id_unidade=${selectedUnitId}`;
+
+    const result = await safeFetch(url);
+    if (!result.success) {
+        showToast('Erro ao carregar produtos.', 'error');
+        return;
+    }
+
+    // Filtra somente produtos com estoque baixo ou zerado
+    const baixos = result.produtos.filter(p =>
+        p.status_estoque === 'Baixo' || p.status_estoque === 'Zerado'
+    );
+
+    const infoEl = document.getElementById('relatorio-estoque-info');
+    const unidadeLabel = selectedUnitId
+        ? (unidadesCache.find(u => u.id_unidade == selectedUnitId)?.nome_unidade || 'Unidade selecionada')
+        : 'Todas as Unidades';
+    const agora = new Date().toLocaleString('pt-BR');
+    infoEl.innerHTML = `<i class="fa-solid fa-circle-info"></i> &nbsp;
+        <strong>${baixos.length} produto(s)</strong> com estoque abaixo do mínimo &nbsp;|&nbsp;
+        Unidade: <strong>${unidadeLabel}</strong> &nbsp;|&nbsp;
+        Gerado em: <strong>${agora}</strong>`;
+
+    const tbody = document.getElementById('table-relatorio-body');
+    if (baixos.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="7" class="text-center text-muted" style="padding:24px;">✅ Nenhum produto com estoque baixo!</td></tr>';
+        return;
+    }
+
+    tbody.innerHTML = baixos.map((p, i) => {
+        const badgeClass = p.status_estoque === 'Zerado' ? 'badge-danger' : 'badge-warning';
+        return `
+            <tr>
+                <td style="color:var(--text-muted)">${i + 1}</td>
+                <td><strong>${p.nome_produto}</strong></td>
+                <td>${p.nome_categoria || '-'}</td>
+                <td>${p.nome_unidade || '-'}</td>
+                <td>${p.estoque_minimo}</td>
+                <td><strong style="font-size:15px;color:${p.estoque_atual === 0 ? '#f87171' : '#fbbf24'}">${p.estoque_atual}</strong></td>
+                <td><span class="badge ${badgeClass}">${p.status_estoque}</span></td>
+            </tr>`;
+    }).join('');
+}
+
+function imprimirRelatorioEstoque() {
+    const info = document.getElementById('relatorio-estoque-info').innerText;
+    const rows = document.getElementById('table-relatorio-body').innerHTML;
+    const thead = document.getElementById('table-relatorio-baixo').querySelector('thead').outerHTML;
+
+    const html = `<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <title>Relatório de Estoque Baixo</title>
+    <style>
+        body { font-family: Arial, sans-serif; padding: 24px; color: #111; }
+        h1 { font-size: 20px; margin-bottom: 4px; }
+        .info { font-size: 12px; color: #555; margin-bottom: 16px; padding: 8px 12px; background: #fff8e1; border-left: 4px solid #f59e0b; border-radius: 4px; }
+        table { width: 100%; border-collapse: collapse; font-size: 13px; }
+        th { background: #1e293b; color: #fff; padding: 8px 10px; text-align: left; }
+        td { padding: 7px 10px; border-bottom: 1px solid #e2e8f0; }
+        tr:nth-child(even) td { background: #f8fafc; }
+        .badge { padding: 2px 8px; border-radius: 20px; font-size: 11px; font-weight: 600; }
+        .badge-warning { background: #fef3c7; color: #92400e; }
+        .badge-danger { background: #fee2e2; color: #991b1b; }
+        @page { margin: 16mm; }
+    </style>
+</head>
+<body>
+    <h1>⚠️ Relatório de Estoque Baixo</h1>
+    <div class="info">${info}</div>
+    <table>
+        ${thead}
+        <tbody>${rows}</tbody>
+    </table>
+</body>
+</html>`;
+
+    const win = window.open('', '_blank');
+    win.document.write(html);
+    win.document.close();
+    win.onload = () => win.print();
 }

@@ -1,15 +1,18 @@
+import os
 from flask import Flask, render_template, request, jsonify
+from dotenv import load_dotenv
 import database
 
-app = Flask(__name__)
-app.config['SECRET_KEY'] = 'controle_estoques_access_secret_key_2026'
+load_dotenv()
 
-# Inicializar o banco de dados se necessário ao subir a aplicação
+app = Flask(__name__)
+app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'dev-secret-key-change-in-production')
+
+# Inicializar o banco de dados ao subir a aplicação
+# Se DATABASE_URL não estiver configurada, o app para imediatamente com mensagem clara nos logs
 with app.app_context():
-    try:
-        database.init_db()
-    except Exception as e:
-        print(f"[ERRO INIT DB] {e}")
+    database.init_db()
+
 
 @app.route('/')
 def index():
@@ -265,8 +268,24 @@ def api_movimentacoes():
         else:
             id_unidade = None
 
+        id_produto = request.args.get('id_produto')
+        if id_produto and id_produto.isdigit():
+            id_produto = int(id_produto)
+        else:
+            id_produto = None
+
+        data_inicio = request.args.get('data_inicio', '').strip() or None
+        data_fim = request.args.get('data_fim', '').strip() or None
+        tipo_movimentacao = request.args.get('tipo_movimentacao', '').strip() or None
+
         try:
-            movs = database.listar_movimentacoes(id_unidade=id_unidade)
+            movs = database.listar_movimentacoes(
+                id_unidade=id_unidade,
+                id_produto=id_produto,
+                data_inicio=data_inicio,
+                data_fim=data_fim,
+                tipo_movimentacao=tipo_movimentacao
+            )
             return jsonify({'success': True, 'movimentacoes': movs})
         except Exception as e:
             return jsonify({'success': False, 'message': str(e)}), 500
@@ -279,6 +298,7 @@ def api_movimentacoes():
         obs = data.get('observacao', '')
         data_mov = data.get('data_movimentacao')
         id_unidade = data.get('id_unidade')
+        id_fornecedor = data.get('id_fornecedor')
 
         if not id_produto or not tipo or not qtd:
             return jsonify({'success': False, 'message': 'Produto, tipo e quantidade são obrigatórios.'}), 400
@@ -291,7 +311,8 @@ def api_movimentacoes():
                 valor_unitario=valor,
                 observacao=obs,
                 data_movimentacao=data_mov,
-                id_unidade=id_unidade
+                id_unidade=id_unidade,
+                id_fornecedor=id_fornecedor
             )
             return jsonify({'success': True, 'message': f'Movimentação de {tipo} registrada com sucesso!'})
         except Exception as e:
